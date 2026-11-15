@@ -126,6 +126,28 @@ USB 断连、又不想把自建 debug 签名包传到公开仓库时用这条。
 
 注意：服务只在 Mac 开着时可用，不要长期开着；APK 是本地 debug 签名包，不是商店正式版，不要当对外分发。
 
+## 四之四、Windows 克隆独立打包（2026-11-15 实测）
+
+Mac mini 之外，Windows 克隆也能出离线 release 包，但要先跨过三道 Windows 特有的坎。改动全为会话级或可撤销，不改系统环境变量。
+
+一次性前置（属用户级工具链，可用 `cargo uninstall cargo-ndk` / `rustup target remove aarch64-linux-android` 撤销）：
+
+    cargo install cargo-ndk --version 4.1.2 --locked
+    rustup target add aarch64-linux-android
+    pnpm install --frozen-lockfile    # Electron 下载失败时加 ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
+
+每次构建前 export（关窗即散）：Node 22.20.0（nvm）、`JAVA_HOME=C:/Users/loszh/.jdks/azul-17.0.13`、`ANDROID_HOME` / `ANDROID_SDK_ROOT` 指向 SDK、`ANDROID_NDK_HOME=<SDK>/ndk/27.0.12077973`、`platform-tools` 加 PATH、`EXPO_PUBLIC_CINDY_AUTH_REGION=global`、`CINDY_AGENT_NET_ANDROID_ABIS=arm64-v8a`、`NODE_OPTIONS=--max-old-space-size=6144`。`~/.gradle/gradle.properties` 里已有 `org.gradle.java.home` 和代理 `127.0.0.1:7890`，构建前确认代理在跑。生成 android/ 用 `CI=1 pnpm exec expo prebuild --platform android`（`--non-interactive` 不被支持）。
+
+三道坎：
+
+1. **MAX_PATH**：reanimated 与 app 模块的 CMake object 路径分别到 264 / 367 字符，SDK 自带 `cmake/3.22.1/bin/ninja.exe` 是 1.10.2，不吃长路径（系统 `LongPathsEnabled=1` 也没用）。临时换成 ninja 1.12.1（备份原文件，构建后恢复）；再 `subst X: <仓库根>`，并临时把 `node_modules/react-native-reanimated/android/CMakeLists.txt` 的源码根指向 `X:/node_modules/react-native-reanimated`。**不要从 X: 启动整个构建**：Metro 会解析不了 `@cindy/maker-shared/message-source`。
+2. **KSP 跨盘**：`:expo-image:kspReleaseKotlin` 报 `this and base files have different roots`（C: 的 Gradle 缓存 vs E: 的项目）。用 `--gradle-user-home E:/gradle-home`，并把 `~/.gradle/gradle.properties` 复制到该目录，让缓存与项目同在 E 盘。别改全局 `GRADLE_USER_HOME`，会牵连本机其它 Gradle 项目共用的 9.9 G 缓存。
+3. 构建：`cd apps/mobile/android && ./gradlew --gradle-user-home E:/gradle-home :app:assembleRelease -Pandroid.enableMinifyInReleaseBuilds=false -Pandroid.enableShrinkResourcesInReleaseBuilds=false -PreactNativeArchitectures=arm64-v8a`。
+
+2026-11-15 22:17 实测 `BUILD SUCCESSFUL in 2m 32s`（1551 任务，1430 个 UP-TO-DATE），产物 `app/build/outputs/apk/release/app-release.apk` 139,849,246 字节，内嵌 41,740,792 字节 `assets/index.android.bundle` 与 `lib/arm64-v8a/libcindy_agent_net_native.so`，`apksigner` V2 签名 `CN=Android Debug`，可 `adb install -r` 覆盖、不丢登录态。
+
+收尾务必撤销临时改动：恢复 ninja 1.10.2、`subst X: /d`、还原 CMakeLists、删掉临时 junction。`E:/gradle-home`（4.1 G 缓存）和 `apps/mobile/android/`（1.7 G 产物）保留可加速下次；下次重打必须重建第 1、2 项，否则会撞回原错。
+
 ## 五、真机验证方法
 
 - adb -s <serial> shell dumpsys package com.xd.cindy 看版本号；dumpsys activity activities 看前台是否为 com.xd.cindy/.MainActivity
@@ -145,9 +167,11 @@ USB 断连、又不想把自建 debug 签名包传到公开仓库时用这条。
 9. 本地无 self-host-regions.json 时回落空白模板：不烘焙官方 Google 配置，原生 Google 路径在本地包里不可用——正好纯粹验证浏览器回退；要验原生路需另配真实 client ID。
 10. 同步上游的冲突面：补丁只动移动端 auth 的 6 个文件，上游改到同文件才可能冲突；自动化/手动同步都遵循冲突即停、回滚、不硬解。
 
-## 七、状态记录（截至 2026-11-15 19:21）
+## 七、状态记录（截至 2026-11-15 22:25）
 
 - 补丁（ef2d086ca7）已提交并推送到 fork；feat/google-browser-login 完整包含 main
 - 本次同步点（2026-11-15 18:55）：main 先 ff-only 到 ee9fb7349a（PR #10672），再以 d981976fc6 合入 feat/google-browser-login。本批 44 个提交 / 165 文件 / +8901/−263，与补丁 6 个文件零重叠、依赖与原生文件无变化，合并零冲突。合并后验证：定向 47/47、移动端回归 107/107、tsc --noEmit exit 0、git diff --check 通过。上游之后仍持续推提交，同步状态一律以 git rev-list --left-right --count main...upstream/main 为准，不要再写「当前已同步」
 - 手机状态：2026-11-15 18:04 已装本地 release 包（133.3 MiB，内嵌 41.7 MB assets/index.android.bundle，apksigner 验签通过，adb install -r Success），离线启动为已登录主界面、无崩溃，8081 无 Metro，不再依赖电脑；交付件 /Users/zhangjiji/projects/cindy-dev/cindy-release-arm64-v8a.apk。两次合并（b975dc39bc..553c21b22f 的 443 文件、553c21b22f..ee9fb7349a 的 165 文件）都没有 android/、.so、CMake、gradle、Rust、app.config.js、lockfile，原生层无需重编；首次合并后重跑 expo run:android 为 41s BUILD SUCCESSFUL、864 任务中 838 个 UP-TO-DATE、APK 时间戳仍是 16:08，只是 Gradle 判定内容一致。注意：该 18:03 交付件内嵌的是 18:01 的 JS bundle；18:55 合并后代码又前进 44 个提交，已于 19:18 按四之二重打（新 bundle sha256 7b3839a5…，与旧包 e9499e20… 不同，133.4 MiB / 139847950 字节），19:21 起通过局域网页面分发，见四之三；记录时 USB 仍未连接，安装由手机侧完成
+- 同步点（2026-11-15 22:25）：上游在 18:55 之后又推了 99 个提交（含此前核对过的 55 个 + 之后 44 个），main ff-only 到 880f3032dd（PR #10654），再以 17365ca660 合入 feat/google-browser-login。本批 99 提交 / 235 文件，与补丁 6 个文件、本文档、feat 现有 7 个差异文件全部零重叠；pnpm-lock.yaml 未变，原生改动只有 4 个 desktop Rust 与 1 个 iOS Swift 文件，安卓原生层不受影响。合并后验证：定向 47/47、tsc --noEmit exit 0、git diff --check 通过。Windows 克隆没有 upstream remote，用 `git fetch https://github.com/makecindy/cindy.git main` + `git merge --ff-only FETCH_HEAD` 同步；同步状态仍以 `git rev-list --left-right --count main...upstream/main` 为准，不要写「当前已同步」
+- Windows 侧 22:17 那个包内嵌的是 e44db32b61 的 JS bundle，本次合并后已过时；要给手机装最新代码需按四之四重打（记录时手机只有一个 offline 模拟器，先连上真机）
 - 待办：上游自动监控方案（本机 LaunchAgent / GitHub Actions）尚未选定；局域网 HTTP 服务是临时进程，下载安装完成后关闭
