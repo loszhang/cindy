@@ -1,7 +1,7 @@
 # Cindy 安卓 Google 登录补丁与 APK 打包说明
 
 整理日期：2026-11-15
-基线：分叉点 main @ b975dc39bc（Merge PR #10570）；本次同步点（2026-11-15 17:04）main @ 553c21b22f（PR #10653）
+基线：分叉点 main @ b975dc39bc（Merge PR #10570）；本次同步点（2026-11-15 18:55）main @ ee9fb7349a（PR #10672）
 补丁提交：ef2d086ca7 fix(mobile-auth): use browser PKCE for Google on Android without Play Services
 分支：feat/google-browser-login（fork：loszhang/cindy；上游：makecindy/cindy）
 
@@ -124,9 +124,9 @@ Global Android 的 Google 登录只有原生 GMS 一条路，没有浏览器兜�
 9. 本地无 self-host-regions.json 时回落空白模板：不烘焙官方 Google 配置，原生 Google 路径在本地包里不可用——正好纯粹验证浏览器回退；要验原生路需另配真实 client ID。
 10. 同步上游的冲突面：补丁只动移动端 auth 的 6 个文件，上游改到同文件才可能冲突；自动化/手动同步都遵循冲突即停、回滚、不硬解。
 
-## 七、状态记录（截至 2026-11-15 18:04）
+## 七、状态记录（截至 2026-11-15 18:55）
 
 - 补丁（ef2d086ca7）已提交并推送到 fork；feat/google-browser-login 完整包含 main
-- 本次同步点（2026-11-15 17:04）：以 72f1a7b6e4 将 main 合入 feat/google-browser-login，零冲突（上游未碰补丁的 6 个文件）；当时 main ff-only 到 553c21b22f（PR #10653）并与 upstream/main 一致。上游之后仍持续推提交，同步状态一律以 git rev-list --left-right --count main...upstream/main 为准，不要再写「当前已同步」
-- 手机状态：2026-11-15 18:04 已装本地 release 包（133.3 MiB，内嵌 41.7 MB assets/index.android.bundle，apksigner 验签通过，adb install -r Success），离线启动为已登录主界面、无崩溃，8081 无 Metro，不再依赖电脑；交付件 /Users/zhangjiji/projects/cindy-dev/cindy-release-arm64-v8a.apk。合并后重跑 expo run:android 为 41s BUILD SUCCESSFUL、864 任务中 838 个 UP-TO-DATE，APK 文件时间戳仍是 16:08 —— 上游与补丁均未改动原生代码（b975dc39bc..553c21b22f 的 443 个文件里没有 android/、.so、CMake、gradle、Rust、app.config.js、lockfile），原生层无需重编，时间戳未变只是 Gradle 判定内容一致
-- 待办：上游自动监控方案（本机 LaunchAgent / GitHub Actions）尚未选定
+- 本次同步点（2026-11-15 18:55）：main 先 ff-only 到 ee9fb7349a（PR #10672），再以 d981976fc6 合入 feat/google-browser-login。本批 44 个提交 / 165 文件 / +8901/−263，与补丁 6 个文件零重叠、依赖与原生文件无变化，合并零冲突。合并后验证：定向 47/47、移动端回归 107/107、tsc --noEmit exit 0、git diff --check 通过。上游之后仍持续推提交，同步状态一律以 git rev-list --left-right --count main...upstream/main 为准，不要再写「当前已同步」
+- 手机状态：2026-11-15 18:04 已装本地 release 包（133.3 MiB，内嵌 41.7 MB assets/index.android.bundle，apksigner 验签通过，adb install -r Success），离线启动为已登录主界面、无崩溃，8081 无 Metro，不再依赖电脑；交付件 /Users/zhangjiji/projects/cindy-dev/cindy-release-arm64-v8a.apk。两次合并（b975dc39bc..553c21b22f 的 443 文件、553c21b22f..ee9fb7349a 的 165 文件）都没有 android/、.so、CMake、gradle、Rust、app.config.js、lockfile，原生层无需重编；首次合并后重跑 expo run:android 为 41s BUILD SUCCESSFUL、864 任务中 838 个 UP-TO-DATE、APK 时间戳仍是 16:08，只是 Gradle 判定内容一致。注意：该离线包内嵌的是 18:01 的 JS bundle，本次 18:55 合并后代码又前进 44 个提交，需按四之二重新打包安装才与代码一致（记录时 USB 未连接）
+- 待办：上游自动监控方案（本机 LaunchAgent / GitHub Actions）尚未选定；手机离线包需按四之二重打才能跟到最新代码
