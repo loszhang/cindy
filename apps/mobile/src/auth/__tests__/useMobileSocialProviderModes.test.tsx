@@ -75,6 +75,27 @@ function wechatButton() {
   return host.querySelector('[data-testid="login.wechatButton"]');
 }
 
+const googleProviders: SocialProvider[] = ['google'];
+
+function GoogleProbe() {
+  const modes = useMobileSocialProviderModes({
+    providers: googleProviders,
+    region: 'global',
+  });
+  return <div data-testid="google-mode">{modes.get('google') ?? 'hidden'}</div>;
+}
+
+async function renderGoogleProbe() {
+  await act(async () => {
+    root.render(<GoogleProbe />);
+    await Promise.resolve();
+  });
+}
+
+function googleMode() {
+  return host.querySelector('[data-testid="google-mode"]')?.textContent;
+}
+
 describe('mobile social provider visibility', () => {
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
@@ -173,5 +194,34 @@ describe('mobile social provider visibility', () => {
     expect(wechatButton()).toBeNull();
     expect(native.available).not.toHaveBeenCalled();
     expect(native.listeners.size).toBe(0);
+  });
+
+  it('uses the browser flow for Google on Global Android when Play Services is unavailable', async () => {
+    native.platform = 'android';
+    await renderGoogleProbe();
+    expect(googleMode()).toBe('browser');
+    expect(native.available).toHaveBeenCalledWith('google');
+  });
+
+  it('uses native Google on Global Android when Play Services is available', async () => {
+    native.platform = 'android';
+    native.available.mockResolvedValue(true);
+    await renderGoogleProbe();
+    expect(googleMode()).toBe('native');
+  });
+
+  it('switches Google to native on foreground once Play Services appears', async () => {
+    native.platform = 'android';
+    native.available.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    await renderGoogleProbe();
+    expect(googleMode()).toBe('browser');
+
+    await act(async () => {
+      for (const listener of native.listeners) listener('active');
+      await Promise.resolve();
+    });
+
+    expect(googleMode()).toBe('native');
+    expect(native.available).toHaveBeenCalledTimes(2);
   });
 });
