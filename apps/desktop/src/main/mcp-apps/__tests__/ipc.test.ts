@@ -203,7 +203,7 @@ describe('MCP App persistence and IPC wiring', () => {
     const rejected = expect(pending).rejects.toThrow('MCP_APP_REQUEST_FAILED');
     await vi.waitFor(() => expect(state.action).toHaveBeenCalledOnce());
     expect(state.action.mock.calls[0].slice(0, 5)).toEqual(['renderer:1', null,
-      expect.objectContaining({ id: 'lookup', serverId: 'plugin-source' }), 'lookup', { scope: 'declared', trigger: '@', query: 'issue' }]);
+      expect.objectContaining({ id: 'lookup', config: state.plugin.config }), 'lookup', { scope: 'declared', trigger: '@', query: 'issue' }]);
     await state.handle!({ sender: { id: 2 } }, null, { op: 'plugin-action-cancel', requestId: 'one' });
     expect(signal!.aborted).toBe(false);
     await state.handle!(event, null, { op: 'plugin-action-cancel', requestId: 'one' });
@@ -402,14 +402,19 @@ describe('MCP App persistence and IPC wiring', () => {
       ['task', { op: 'message', viewId: 'remote-view', message }], { preSend: expect.any(Function) });
 
     state.open.mockResolvedValue(document);
-    expect(await state.handle!({ sender: { id: 1 } }, 'task', { op: 'open', clientId: 'card' }))
+    const sdkCacheHashes = ['0'.repeat(64)];
+    expect(await state.handle!({ sender: { id: 1 } }, 'task', { op: 'open', clientId: 'card', sdkCacheHashes }))
       .toEqual({ viewId: 'remote-view', transport: 'sandbox', prefersBorder: true });
+
+    expect(state.open).toHaveBeenLastCalledWith('renderer:1', 'task', 'card', {}, undefined, undefined);
 
     // Mobile still reaches the execution Host over the existing same-account channel.
     state.remote = { controllerDeviceId: 'phone' };
     state.open.mockResolvedValue(document);
     expect(await state.handle!({}, 'task', { op: 'open', clientId: 'card' })).toEqual(document);
-    expect(state.open).toHaveBeenCalledWith('device:phone', 'task', 'card', {}, undefined);
+    expect(state.open).toHaveBeenLastCalledWith('device:phone', 'task', 'card', {}, undefined, undefined);
+    expect(await state.handle!({}, 'task', { op: 'open', clientId: 'card', sdkCacheHashes })).toEqual(document);
+    expect(state.open).toHaveBeenLastCalledWith('device:phone', 'task', 'card', {}, undefined, expect.any(Function));
     await state.handle!({}, 'task', { op: 'message', viewId: 'remote-view', message });
     expect(state.dispatch).toHaveBeenCalledWith('device:phone', 'task', 'remote-view', message);
   });
