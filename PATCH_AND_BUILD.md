@@ -105,6 +105,27 @@ Global Android 的 Google 登录只有原生 GMS 一条路，没有浏览器兜�
 
 5. 不要照抄第四节第 1 步的 adb uninstall：会清掉登录态和本地数据，并把手机退回必须连 Metro 的 debug 包。
 
+## 四之三、局域网分发（不经过公网，自己用推荐）
+
+USB 断连、又不想把自建 debug 签名包传到公开仓库时用这条。fork 的可见性跟随上游（GitHub 规则：public 仓库的 fork 不能单独改成私有），所以「也就自己用」时局域网比公开 Release 更合适、也不用登录 GitHub。
+
+1. 每次合并上游后先按四之二重打：release 包内嵌 JS bundle，不重打就会把旧代码装回手机。重打前把旧 APK 另存一份做回退。
+2. 单独建一个只放产物的服务目录，别把整个项目目录暴露到局域网；APK 用短文件名，下载页用自包含单文件（样式内联、无外部资源、相对链接指向 APK，附大小 / SHA-256 / 安装步骤 / 同签名说明）：
+
+    mkdir -p /Users/zhangjiji/projects/cindy-dev/apk-serve
+    cp <新 app-release.apk> /Users/zhangjiji/projects/cindy-dev/apk-serve/cindy-release.apk
+
+3. 起服务（独立进程组后台运行，避免被 App 退出带走；日志留访问记录）：
+
+    python3 -m http.server 8000 --bind 0.0.0.0 --directory /Users/zhangjiji/projects/cindy-dev/apk-serve > /Users/zhangjiji/projects/cindy-dev/lan-http.log 2>&1 &
+
+4. 取真实局域网 IP：看 ifconfig 里物理网卡（如 en1）的 inet。不要用 UDP 默认路由探测出来的 198.18.0.1 —— 那是 VPN/utun 虚拟地址，手机连不上。IP 会随 DHCP 变，每次重新看。
+5. 自检：`curl -sI http://127.0.0.1:8000/` 与 `curl -sI http://<局域网 IP>:8000/` 都要 200；APK 的 HEAD 应返回 200 且 Content-Length 等于文件字节数。
+6. 手机与 Mac 同 WiFi，浏览器打开 `http://<局域网 IP>:8000/` → 下载 → 允许「安装未知应用」→ Coolpad 安全管家确认 → 点 APK 安装（同签名走更新，不丢登录态与本地数据）→ 重新打开 App。
+7. 下载完关服务：`kill <http pid>`；lan-http.log 的访问记录可确认是否下完。macOS 防火墙若拦截 python 入站，手机会打不开，需放行。
+
+注意：服务只在 Mac 开着时可用，不要长期开着；APK 是本地 debug 签名包，不是商店正式版，不要当对外分发。
+
 ## 五、真机验证方法
 
 - adb -s <serial> shell dumpsys package com.xd.cindy 看版本号；dumpsys activity activities 看前台是否为 com.xd.cindy/.MainActivity
@@ -124,9 +145,9 @@ Global Android 的 Google 登录只有原生 GMS 一条路，没有浏览器兜�
 9. 本地无 self-host-regions.json 时回落空白模板：不烘焙官方 Google 配置，原生 Google 路径在本地包里不可用——正好纯粹验证浏览器回退；要验原生路需另配真实 client ID。
 10. 同步上游的冲突面：补丁只动移动端 auth 的 6 个文件，上游改到同文件才可能冲突；自动化/手动同步都遵循冲突即停、回滚、不硬解。
 
-## 七、状态记录（截至 2026-11-15 18:55）
+## 七、状态记录（截至 2026-11-15 19:21）
 
 - 补丁（ef2d086ca7）已提交并推送到 fork；feat/google-browser-login 完整包含 main
 - 本次同步点（2026-11-15 18:55）：main 先 ff-only 到 ee9fb7349a（PR #10672），再以 d981976fc6 合入 feat/google-browser-login。本批 44 个提交 / 165 文件 / +8901/−263，与补丁 6 个文件零重叠、依赖与原生文件无变化，合并零冲突。合并后验证：定向 47/47、移动端回归 107/107、tsc --noEmit exit 0、git diff --check 通过。上游之后仍持续推提交，同步状态一律以 git rev-list --left-right --count main...upstream/main 为准，不要再写「当前已同步」
-- 手机状态：2026-11-15 18:04 已装本地 release 包（133.3 MiB，内嵌 41.7 MB assets/index.android.bundle，apksigner 验签通过，adb install -r Success），离线启动为已登录主界面、无崩溃，8081 无 Metro，不再依赖电脑；交付件 /Users/zhangjiji/projects/cindy-dev/cindy-release-arm64-v8a.apk。两次合并（b975dc39bc..553c21b22f 的 443 文件、553c21b22f..ee9fb7349a 的 165 文件）都没有 android/、.so、CMake、gradle、Rust、app.config.js、lockfile，原生层无需重编；首次合并后重跑 expo run:android 为 41s BUILD SUCCESSFUL、864 任务中 838 个 UP-TO-DATE、APK 时间戳仍是 16:08，只是 Gradle 判定内容一致。注意：该离线包内嵌的是 18:01 的 JS bundle，本次 18:55 合并后代码又前进 44 个提交，需按四之二重新打包安装才与代码一致（记录时 USB 未连接）
-- 待办：上游自动监控方案（本机 LaunchAgent / GitHub Actions）尚未选定；手机离线包需按四之二重打才能跟到最新代码
+- 手机状态：2026-11-15 18:04 已装本地 release 包（133.3 MiB，内嵌 41.7 MB assets/index.android.bundle，apksigner 验签通过，adb install -r Success），离线启动为已登录主界面、无崩溃，8081 无 Metro，不再依赖电脑；交付件 /Users/zhangjiji/projects/cindy-dev/cindy-release-arm64-v8a.apk。两次合并（b975dc39bc..553c21b22f 的 443 文件、553c21b22f..ee9fb7349a 的 165 文件）都没有 android/、.so、CMake、gradle、Rust、app.config.js、lockfile，原生层无需重编；首次合并后重跑 expo run:android 为 41s BUILD SUCCESSFUL、864 任务中 838 个 UP-TO-DATE、APK 时间戳仍是 16:08，只是 Gradle 判定内容一致。注意：该 18:03 交付件内嵌的是 18:01 的 JS bundle；18:55 合并后代码又前进 44 个提交，已于 19:18 按四之二重打（新 bundle sha256 7b3839a5…，与旧包 e9499e20… 不同，133.4 MiB / 139847950 字节），19:21 起通过局域网页面分发，见四之三；记录时 USB 仍未连接，安装由手机侧完成
+- 待办：上游自动监控方案（本机 LaunchAgent / GitHub Actions）尚未选定；局域网 HTTP 服务是临时进程，下载安装完成后关闭
