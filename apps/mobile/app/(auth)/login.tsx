@@ -735,13 +735,26 @@ export function LoginScreen({
                 // SC-SOC-7: in-flight(disabled)期间 no-op 防重复发起;行为层 guard,
                 // 零视觉变化(圆钮已无 disabled 态 per §10 拍板,不回填 disabled 视觉)。
                 if (disabled) return;
-                // Google/微信属个人登录链路,过协议门;同意后续接本次 native-social
-                requireConsent(() =>
+                // Google/微信属个人登录链路,过协议门;Google 在 Global Android
+                // 无 GMS 时 mode 为 browser,同意后走系统浏览器 PKCE(与 Apple 同路),
+                // 其余情况续接本次 native-social
+                requireConsent(() => {
+                  if (
+                    provider === 'google' &&
+                    socialProviderModes.get(provider) === 'browser'
+                  ) {
+                    void auth.dispatchLoginAction({
+                      type: 'start-social-browser',
+                      provider,
+                      label: socialLabel(provider),
+                    });
+                    return;
+                  }
                   void auth.dispatchLoginAction({
                     type: 'native-social',
                     provider,
-                  }),
-                );
+                  });
+                });
               }}
               // 对象展开保持 testID: 键形态(mobileAuthServerLogin 守护测试锚定该字面)
               {...{ testID: `login.${provider}Button` }}

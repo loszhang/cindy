@@ -68,6 +68,39 @@ describe('resolveMobileSocialLoginMode', () => {
     ).toBeNull();
   });
 
+  it('uses browser PKCE for Google on Global Android without native support', () => {
+    expect(
+      resolveMobileSocialLoginMode({
+        provider: 'google',
+        region: 'global',
+        platform: 'android',
+        nativeSupported: false,
+      }),
+    ).toBe('browser');
+  });
+
+  it('does not offer the Google browser fallback on Mainland China Android', () => {
+    expect(
+      resolveMobileSocialLoginMode({
+        provider: 'google',
+        region: 'cn',
+        platform: 'android',
+        nativeSupported: false,
+      }),
+    ).toBeNull();
+  });
+
+  it('does not fall back to browser for Google on iOS', () => {
+    expect(
+      resolveMobileSocialLoginMode({
+        provider: 'google',
+        region: 'global',
+        platform: 'ios',
+        nativeSupported: false,
+      }),
+    ).toBeNull();
+  });
+
   it('keeps other configured providers on their native path', () => {
     expect(
       resolveMobileSocialLoginMode({

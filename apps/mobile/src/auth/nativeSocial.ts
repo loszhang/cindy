@@ -52,11 +52,31 @@ export function isNativeSocialProviderSupported(
  * device. The current login UI offers WeChat only on Mainland China iOS after
  * the SDK confirms that WeChat is installed. Android credential acquisition
  * remains available to callers, but the login UI does not advertise it.
+ * Google on Android is probed for Play Services instead: the native SDK
+ * cannot sign in without GMS, so availability must reflect the runtime
+ * probe (silently, without the update dialog) rather than the build-time
+ * configuration alone. Callers use a false result to fall back to the
+ * browser PKCE flow.
  */
 export async function isNativeSocialProviderAvailable(
   provider: SocialProvider,
 ): Promise<boolean> {
   if (!isNativeSocialProviderSupported(provider)) return false;
+  if (provider === 'google' && Platform.OS === 'android') {
+    try {
+      const { GoogleSignin } =
+        await import('@react-native-google-signin/google-signin');
+      GoogleSignin.configure({
+        webClientId: GOOGLE_WEB_CLIENT_ID,
+        offlineAccess: false,
+      });
+      return await GoogleSignin.hasPlayServices({
+        showPlayServicesUpdateDialog: false,
+      });
+    } catch {
+      return false;
+    }
+  }
   if (provider !== 'wechat' || Platform.OS !== 'ios') return true;
   try {
     const { isWechatInstalled } = await import('xdt-wechat-login');
