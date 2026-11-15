@@ -95,8 +95,9 @@ Global Android 的 Google 登录只有原生 GMS 一条路，没有浏览器兜�
 9. 本地无 self-host-regions.json 时回落空白模板：不烘焙官方 Google 配置，原生 Google 路径在本地包里不可用——正好纯粹验证浏览器回退；要验原生路需另配真实 client ID。
 10. 同步上游的冲突面：补丁只动移动端 auth 的 6 个文件，上游改到同文件才可能冲突；自动化/手动同步都遵循冲突即停、回滚、不硬解。
 
-## 七、当前状态（2026-11-15 整理时）
+## 七、当前状态（2026-11-15 更新）
 
-- 补丁已提交并推送到 fork，工作区干净
-- 手机上装的是基于 b975dc39bc + 补丁的 debug 包，已登录可用
-- 待办：上游 main 已继续前进（最后一次成功 fetch 到 ae78647b81，本地 main 落后 149 个提交，已确认与补丁文件零重叠），合并一版 + 重装手机尚未执行；上游自动监控方案（本机 LaunchAgent / GitHub Actions）尚未选定
+- 补丁（ef2d086ca7）与本说明均已提交并推送到 fork，工作区干净
+- 上游合并已完成：2026-11-15 17:04 以 72f1a7b6e4 将 main 合入 feat/google-browser-login，零冲突（上游未碰补丁的 6 个文件）；main 已与 upstream/main 完全同步（同为 553c21b22f，PR #10653），feat 完整包含 main
+- 手机状态：com.xd.cindy（0.1.0 / versionCode 1）的 lastUpdateTime 为 2026-11-15 17:07:45，在合并之后；但 Mac 上 APK 文件仍是 16:08 构建的产物，即原生层未在合并后重新编译，debug 的 JS 由 Metro 按当前已合并的工作区提供
+- 待办：如需原生层也更新到合并后基线，重跑第四节的构建命令即可；上游自动监控方案（本机 LaunchAgent / GitHub Actions）尚未选定
