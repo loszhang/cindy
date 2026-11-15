@@ -1,7 +1,7 @@
 # Cindy 安卓 Google 登录补丁与 APK 打包说明
 
 整理日期：2026-11-15
-基线：main @ b975dc39bc（Merge PR #10570）
+基线：分叉点 main @ b975dc39bc（Merge PR #10570）；本次同步点（2026-11-15 17:04）main @ 553c21b22f（PR #10653）
 补丁提交：ef2d086ca7 fix(mobile-auth): use browser PKCE for Google on Android without Play Services
 分支：feat/google-browser-login（fork：loszhang/cindy；上游：makecindy/cindy）
 
@@ -47,9 +47,20 @@ Global Android 的 Google 登录只有原生 GMS 一条路，没有浏览器兜�
 
 ## 二、仓库与分支结构
 
-- origin = loszhang/cindy（可推）；upstream = makecindy/cindy（只拉，push 已禁用防误推）
+- 本机 Mac mini 克隆：origin = loszhang/cindy（可推）；upstream = makecindy/cindy（只拉，push 已禁用防误推）。其他克隆（如 Windows 工作区）可能只有 origin，需自行补 upstream
 - main 只跟 upstream 做 ff-only 同步，永不在 main 上改代码；改动都在 feat/google-browser-login
-- 同步步骤见同目录 SYNC.md；上游 PR 已明确不开，补丁只留在 fork
+- 同步步骤见仓库父目录 SYNC.md（/Users/zhangjiji/projects/cindy-dev/SYNC.md，844B）；该文件在仓库外、不随 git 分发，其他克隆直接按下面命令操作；上游 PR 已明确不开，补丁只留在 fork
+
+    git checkout main
+    git fetch upstream
+    git merge --ff-only upstream/main
+    git push origin main
+    git checkout feat/google-browser-login
+    git merge main
+    git push origin feat/google-browser-login
+
+若只需同步 fork 的 main（不跟踪上游后续提交），git pull origin main 即可，不必配 upstream。
+
 - gh 2.104.0 已装并登录（账号 loszhang），git user.name 已设 loszhang
 
 ## 三、打包前置条件（本机 Mac mini，arm64 / 8GB）
@@ -76,6 +87,24 @@ Global Android 的 Google 登录只有原生 GMS 一条路，没有浏览器兜�
 4. 增量重建：改 env 后先在 android/ 里 ./gradlew --stop 停旧 Daemon，再重跑同一条命令；缓存命中时全程约 2 分 46 秒（864 任务中 806 个 UP-TO-DATE）。构建中途进程被杀不用 clean，重跑即续。
 5. 只装现成 APK：adb -s <serial> install -r -d --user 0 <app-debug.apk 路径>
 
+## 四之二、本地独立 release 包（离线可用）
+
+不连 Metro、Mac 关机也能用的包。本机交付件：/Users/zhangjiji/projects/cindy-dev/cindy-release-arm64-v8a.apk（133.3 MiB）。
+
+1. 构建（在 apps/mobile/android 下，env 与第四节相同）：
+
+    cd /Users/zhangjiji/projects/cindy-dev/cindy/apps/mobile/android
+    EXPO_PUBLIC_CINDY_AUTH_REGION=global CINDY_AGENT_NET_ANDROID_ABIS=arm64-v8a ANDROID_HOME=$HOME/Library/Android/sdk ANDROID_SDK_ROOT=$HOME/Library/Android/sdk ANDROID_NDK_HOME=$HOME/Library/Android/sdk/ndk/27.1.12297006 NODE_OPTIONS=--max-old-space-size=6144 ./gradlew :app:assembleRelease -Pandroid.enableMinifyInReleaseBuilds=false -Pandroid.enableShrinkResourcesInReleaseBuilds=false -PreactNativeArchitectures=arm64-v8a
+
+2. 三个开关的原因：默认在 minifyReleaseWithR8 阶段失败过一次（日志 `Gradle build daemon has been stopped: stop command received`），关掉 minify/shrink 后 BUILD SUCCESSFUL in 2m 20s；限定 arm64 后 APK 从全 ABI 的 316M 降到 133M。产物在 apps/mobile/android/app/build/outputs/apk/release/app-release.apk，内嵌 assets/index.android.bundle（41.7 MB）。
+3. 签名仍是 debug.keystore（build.gradle 的 release 也指向它），与原 debug 包同签名，可直接 adb install -r 覆盖，不丢登录态和本地数据；这不是商店正式包（无自有 keystore、无 R8 混淆、无 OTA/Play 配置）。
+4. 校验与安装：
+
+    $HOME/Library/Android/sdk/build-tools/37.0.0/apksigner verify --print-certs <apk>
+    adb -s <serial> install -r <apk>
+
+5. 不要照抄第四节第 1 步的 adb uninstall：会清掉登录态和本地数据，并把手机退回必须连 Metro 的 debug 包。
+
 ## 五、真机验证方法
 
 - adb -s <serial> shell dumpsys package com.xd.cindy 看版本号；dumpsys activity activities 看前台是否为 com.xd.cindy/.MainActivity
@@ -90,14 +119,14 @@ Global Android 的 Google 登录只有原生 GMS 一条路，没有浏览器兜�
 4. cargo-ndk 缺失是晚期失败：构建跑了 18 分 43 秒才在 agent-net 的 Rust 检查处报错；开工前先 cargo ndk --version 自检。
 5. Gradle Daemon 会缓存环境变量：改了 ABI / NDK / region 后不重启 Daemon，新 env 传不进去。
 6. 国产机安装确认：Coolpad 的安全管家会拦截 USB 安装，adb 进程会一直挂着等确认，Mac 侧看不到报错，只能去手机上点允许/继续安装。
-7. debug 包依赖 Metro：JS 从 Mac 的 Metro（localhost:8081）加载，关掉 expo 进程后 App 打不开属正常；测试期间保持 Mac 上进程存活。
+7. debug 包依赖 Metro：JS 从 Mac 的 Metro（localhost:8081）加载，关掉 expo 进程后 App 打不开属正常；测试期间保持 Mac 上进程存活。release 包内嵌 assets/index.android.bundle，不受此限制（见四之二）。
 8. 连接稳定性：USB 序列号（6381CP260062098）最稳；无线地址（IP:port）会变、mDNS 条目会 offline，构建命令里的 --device 要填当次 adb devices 里状态为 device 的那条。
 9. 本地无 self-host-regions.json 时回落空白模板：不烘焙官方 Google 配置，原生 Google 路径在本地包里不可用——正好纯粹验证浏览器回退；要验原生路需另配真实 client ID。
 10. 同步上游的冲突面：补丁只动移动端 auth 的 6 个文件，上游改到同文件才可能冲突；自动化/手动同步都遵循冲突即停、回滚、不硬解。
 
-## 七、当前状态（2026-11-15 更新）
+## 七、状态记录（截至 2026-11-15 18:04）
 
-- 补丁（ef2d086ca7）与本说明均已提交并推送到 fork，工作区干净
-- 上游合并已完成：2026-11-15 17:04 以 72f1a7b6e4 将 main 合入 feat/google-browser-login，零冲突（上游未碰补丁的 6 个文件）；main 已与 upstream/main 完全同步（同为 553c21b22f，PR #10653），feat 完整包含 main
-- 手机状态：com.xd.cindy（0.1.0 / versionCode 1）的 lastUpdateTime 为 2026-11-15 17:07:45，在合并之后；但 Mac 上 APK 文件仍是 16:08 构建的产物，即原生层未在合并后重新编译，debug 的 JS 由 Metro 按当前已合并的工作区提供
-- 待办：如需原生层也更新到合并后基线，重跑第四节的构建命令即可；上游自动监控方案（本机 LaunchAgent / GitHub Actions）尚未选定
+- 补丁（ef2d086ca7）已提交并推送到 fork；feat/google-browser-login 完整包含 main
+- 本次同步点（2026-11-15 17:04）：以 72f1a7b6e4 将 main 合入 feat/google-browser-login，零冲突（上游未碰补丁的 6 个文件）；当时 main ff-only 到 553c21b22f（PR #10653）并与 upstream/main 一致。上游之后仍持续推提交，同步状态一律以 git rev-list --left-right --count main...upstream/main 为准，不要再写「当前已同步」
+- 手机状态：2026-11-15 18:04 已装本地 release 包（133.3 MiB，内嵌 41.7 MB assets/index.android.bundle，apksigner 验签通过，adb install -r Success），离线启动为已登录主界面、无崩溃，8081 无 Metro，不再依赖电脑；交付件 /Users/zhangjiji/projects/cindy-dev/cindy-release-arm64-v8a.apk。合并后重跑 expo run:android 为 41s BUILD SUCCESSFUL、864 任务中 838 个 UP-TO-DATE，APK 文件时间戳仍是 16:08 —— 上游与补丁均未改动原生代码（b975dc39bc..553c21b22f 的 443 个文件里没有 android/、.so、CMake、gradle、Rust、app.config.js、lockfile），原生层无需重编，时间戳未变只是 Gradle 判定内容一致
+- 待办：上游自动监控方案（本机 LaunchAgent / GitHub Actions）尚未选定
