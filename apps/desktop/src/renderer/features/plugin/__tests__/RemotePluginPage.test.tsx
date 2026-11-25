@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RemotePluginUiEnablePrompt } from '@/components/new-chat/RemotePluginUiEnablePrompt';
-import { RemotePluginPage } from '../RemotePluginPage';
+import { RemotePluginCatalogSource as RemotePluginPage } from '../RemotePluginCatalogSource';
+import { resetPluginCatalogMemoryForTest } from '../lib/pluginCatalogMemory';
 import { setDataOwnerGeneration } from '@/contexts/dataOwnerGeneration';
 import { projectPluginUiConsent } from '../../../../shared/pluginUiConsent';
-import { ghostInstallApprovalToken } from '../../../../shared/ghost';
+import { ghostInstallApprovalToken, ghostPermissionItems } from '../../../../shared/ghost';
 const { invoke, confirm, localGhosts, notices, directoryMode } = vi.hoisted(() => ({
   directoryMode: { real: false },
   notices: { success: vi.fn(), info: vi.fn(), error: vi.fn(), warning: vi.fn(), dismiss: vi.fn() },
@@ -165,7 +167,13 @@ const configurationResource = (state = 'configured', id = 'weather') => ({
   ],
 });
 beforeEach(() => {
+  resetPluginCatalogMemoryForTest();
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
+  // Supply the actual scroller geometry omitted by jsdom now that only real
+  // virtual rows are rendered.
+  vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(800);
+  vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800);
+  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) { return this.tagName === 'MAIN' ? 800 : 150; });
   vi.clearAllMocks();
   directoryMode.real = false;
   setDataOwnerGeneration('test-owner');
@@ -198,10 +206,257 @@ beforeEach(() => {
   );
 });
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 describe('selected plugin host', () => {
+  it('previews the selected computer version and checks the original submission after a lost reply', async () => {
+    const normal = invoke.getMockImplementation()!;
+    const selectedVersion = '2.0.0';
+    const selected = snapshot('Weather on B');
+    const installed = {
+      ...selected.ghosts[0],
+      namespaceState: 'confirmed',
+      publishingSource: { kind: 'local', source: 'manual' },
+      manifest: { ...selected.ghosts[0].manifest, version: selectedVersion },
+    };
+    const submitted = vi.fn();
+    invoke.mockImplementation(async (device, channel, args) => {
+      const request = args[0];
+      if (request?.actionId === 'management:snapshot' && request.input?.read !== 'capabilities' && device === 'computer-b')
+        return { effects: [], result: { ...selected, communityPublication: true, ghosts: [installed] } };
+      if (request?.actionId === 'management:publish-prepare') {
+        const at = new Date().toISOString();
+        return { effects: [], result: { preview: {
+          preparedId: 'preview-b', instanceId: 'weather', pluginId: null, ghostId: 'weather', name: 'Weather on B',
+          description: 'From B', version: selectedVersion, sha256: 'a'.repeat(64), sizeBytes: 42, expiresAt: at,
+          permissionLabels: ghostPermissionItems({ ...selected.ghosts[0].manifest, agent: { hostTools: ['history'] } } as Parameters<typeof ghostPermissionItems>[0]).map(item => item.labelKey), preflight: {
+            subject: { authority: 'https://example.com', membershipId: 'member' }, queriedAt: at, policyVersion: 2,
+            target: { pluginId: null, ghostId: 'weather', version: selectedVersion, expectedRelease: null },
+            pendingRelease: null, blockers: [], actions: { canSubmit: true },
+          },
+        } } };
+      }
+      if (request?.actionId === 'management:publish-submit') {
+        submitted(device, request.input);
+        throw new Error('The reply was lost');
+      }
+      if (request?.actionId === 'management:publish-status') return { effects: [], result: { stage: 'submitted' } };
+      if (request?.actionId === 'management:publish-discard') return { effects: [], result: { discarded: false } };
+      return normal(device, channel, args);
+    });
+    const view = (deviceId: string) => <MemoryRouter>
+      <RemotePluginPage key={deviceId} device={{ deviceId, name: deviceId === 'computer-a' ? 'A' : 'B' }} online />
+    </MemoryRouter>;
+    const ui = render(view('computer-a'));
+    await screen.findByText('computer-a');
+    expect(screen.queryByRole('button', { name: 'settings.ghosts.contribution.myPlugins' })).toBeNull();
+    expect(screen.getByText('settings.ghosts.remote.publishOnTarget')).toBeTruthy();
+
+    ui.rerender(view('computer-b'));
+    fireEvent.click(await screen.findByRole('button', { name: 'settings.ghosts.contribution.myPlugins' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Weather on B · 2.0.0 · weather' }));
+    const submit = await screen.findByRole('button', { name: 'settings.ghosts.contribution.submitVersion' });
+    expect(screen.getByText('From B')).toBeTruthy();
+    expect(screen.getByText('settings.ghosts.perm.hostTools_history')).toBeTruthy();
+    expect(invoke).toHaveBeenCalledWith('computer-b', 'maker:remote-resources:invoke', [expect.objectContaining({
+      actionId: 'management:publish-prepare',
+      input: { expectedInstalledApproval: ghostInstallApprovalToken(installed.approval), expectedVersion: selectedVersion },
+      resourceRef: { collectionId: 'plugins', kind: 'plugin', id: 'weather' },
+    })]);
+    fireEvent.click(submit);
+    await waitFor(() => expect(notices.success).toHaveBeenCalledWith('settings.ghosts.contribution.pendingVersion'));
+    expect(submitted).toHaveBeenCalledExactlyOnceWith('computer-b', { preparedId: 'preview-b' });
+    expect(invoke).toHaveBeenCalledWith('computer-b', 'maker:remote-resources:invoke', [expect.objectContaining({
+      actionId: 'management:publish-status', input: { preparedId: 'preview-b' },
+    })]);
+    expect(localGhosts).not.toHaveBeenCalled();
+  });
+
+  // Unit / review finding 4: old Host snapshots were covered, but their finished
+  // recommendation placeholder was not. Keep three slots while capabilities
+  // are unknown, then remove them for either supported version-1 fallback.
+  it.each(['version-1', 'invalid-params'] as const)('finishes recommendation loading on a non-paging Host: %s', async fallback => {
+    const normal = invoke.getMockImplementation()!;
+    let finish!: () => void;
+    const capability = new Promise<void>(resolve => { finish = resolve; });
+    invoke.mockImplementation(async (device, channel, args) => {
+      if (args?.[0]?.actionId === 'management:snapshot' && args[0].input?.read === 'capabilities') {
+        await capability;
+        if (fallback === 'invalid-params') throw new Error('[INVALID_PARAMS] nonempty input unsupported');
+      }
+      return normal(device, channel, args);
+    });
+    render(<RemotePluginPage device={{ deviceId: 'computer-a', name: 'A' }} online />);
+    const pending = screen.getByText('settings.ghosts.page.todayRecommendations').closest('section')!;
+    expect(pending.querySelectorAll('[aria-hidden="true"]')).toHaveLength(3);
+    await act(async () => { finish(); });
+    await screen.findByText('computer-a');
+    expect(screen.queryByText('settings.ghosts.page.todayRecommendations')).toBeNull();
+    expect(invoke.mock.calls.some(call => call[2]?.[0]?.input?.read === 'recommendations')).toBe(false);
+    expect(invoke.mock.calls.some(call => call[2]?.[0]?.actionId === 'management:snapshot' && Object.keys(call[2][0].input).length === 0)).toBe(true);
+  });
+
+  // Unit: distinguishing unknown from unsupported must not collapse a new
+  // Host's slots before its recommendations arrive (or finish with an error).
+  it.each(['success', 'failure'] as const)('keeps the paging Host recommendation slots until its read finishes: %s', async outcome => {
+    const normal = invoke.getMockImplementation()!;
+    let finish!: (value: unknown) => void, fail!: (error: Error) => void;
+    const recommendations = new Promise((resolve, reject) => { finish = resolve; fail = reject; });
+    invoke.mockImplementation(async (device, channel, args) => {
+      if (args?.[0]?.input?.read === 'capabilities') return { effects: [], result: { catalogPaging: true } };
+      if (args?.[0]?.input?.read === 'recommendations') return { effects: [], result: await recommendations };
+      return normal(device, channel, args);
+    });
+    render(<RemotePluginPage device={{ deviceId: 'computer-a', name: 'A' }} online />);
+    await screen.findByText('computer-a');
+    const section = screen.getByText('settings.ghosts.page.todayRecommendations').closest('section')!;
+    expect(section.querySelectorAll('[aria-hidden="true"]')).toHaveLength(3);
+    const items = Array.from({ length: 3 }, (_, index) => ({ pluginId: `rec-${index}`, ghostId: `rec-${index}`, name: `Recommendation ${index}`,
+      scope: 'public', publisherKind: 'official', releaseId: `release-${index}`, installState: 'not-installed' }));
+    await act(async () => {
+      if (outcome === 'success') finish(items);
+      else fail(new Error('recommendations unavailable'));
+    });
+    if (outcome === 'success') {
+      expect(screen.getByText('Recommendation 0')).toBeTruthy();
+      expect(section.querySelectorAll('[aria-hidden="true"]')).toHaveLength(0);
+    } else expect(screen.queryByText('settings.ghosts.page.todayRecommendations')).toBeNull();
+  });
+
+  // Unit / Codex 4583060230: cached paging capability made a hidden/offline
+  // remount read recommendations and erase them on failure. Foreground-only
+  // tests missed this effect: retain three cached items, then retry on activation.
+  it.each(['hidden', 'offline'] as const)('retains cached recommendations until the remote page is readable: %s', async blocked => {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(10_000);
+    const normal = invoke.getMockImplementation()!;
+    const items = Array.from({ length: 3 }, (_, index) => ({ pluginId: `rec-${index}`, ghostId: `rec-${index}`, name: `Recommendation ${index}`,
+      scope: 'public', publisherKind: 'official', releaseId: `release-${index}`, installState: 'not-installed' }));
+    let fail = false;
+    const recommendations = vi.fn(async () => {
+      if (fail) throw new Error('Host unavailable');
+      return items;
+    });
+    invoke.mockImplementation(async (device, channel, args) => {
+      if (args?.[0]?.input?.read === 'capabilities') return { effects: [], result: { catalogPaging: true } };
+      if (args?.[0]?.input?.read === 'recommendations') return { effects: [], result: await recommendations() };
+      return normal(device, channel, args);
+    });
+    const view = (readable: boolean) => <RemotePluginPage device={{ deviceId: 'computer-a', name: 'A' }}
+      active={blocked !== 'hidden' || readable} online={blocked !== 'offline' || readable} />;
+    const warm = render(view(true));
+    await screen.findByText('Recommendation 0');
+    warm.unmount();
+    clock.mockReturnValue(41_000);
+    fail = true;
+    const mounted = render(view(false));
+    await act(async () => {});
+    expect(recommendations).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('Recommendation 0')).toBeTruthy();
+    await act(async () => { mounted.rerender(view(true)); });
+    expect(recommendations).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('Recommendation 0')).toBeTruthy();
+    fail = false;
+    items[0] = { ...items[0], name: 'Updated recommendation' };
+    mounted.rerender(view(false));
+    mounted.rerender(view(true));
+    expect(await screen.findByText('Updated recommendation')).toBeTruthy();
+    expect(recommendations).toHaveBeenCalledTimes(3);
+  });
+
+  // Unit / Codex 4583482682: hidden remounts previously tested the installed
+  // tab only. A cached market tab older than 30 seconds must retain its data
+  // without catalog/count reads, then refresh each once through activation.
+  it('defers stale market pages and counts on a hidden remount until activation', async () => {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(100_000);
+    const normal = invoke.getMockImplementation()!;
+    let name = 'Cached remote market';
+    const catalog = vi.fn(async (query: { counts?: boolean }) => ({
+      ...snapshot('computer-a').market, nextCursor: null,
+      items: [{ pluginId: 'market-one', ghostId: 'market-one', releaseId: 'release-one', name,
+        scope: 'public', publisherKind: 'official', sourceType: 'server', installState: 'not-installed' }],
+      counts: query.counts ? { all: 1, public: 1, organization: 0, personal: 0, custom: 0 } : null,
+    }));
+    invoke.mockImplementation(async (device, channel, args) => {
+      const input = args?.[0]?.input;
+      if (input?.read === 'capabilities') return { effects: [], result: { catalogPaging: true } };
+      if (input?.read === 'recommendations') return { effects: [], result: [] };
+      if (input?.read === 'catalog') return { effects: [], result: await catalog(input.query) };
+      return normal(device, channel, args);
+    });
+    const view = (active: boolean) => <RemotePluginPage device={{ deviceId: 'computer-a', name: 'A' }} online active={active} />;
+    const warm = render(view(true));
+    await screen.findByText('computer-a');
+    fireEvent.click(screen.getByRole('tab', { name: /^settings.ghosts.page.marketSection/ }));
+    await screen.findByText(name);
+    await waitFor(() => expect(catalog).toHaveBeenCalledTimes(2));
+    warm.unmount();
+    catalog.mockClear();
+    clock.mockReturnValue(131_000);
+    vi.useFakeTimers();
+    const mounted = render(view(false));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(catalog).not.toHaveBeenCalled();
+    name = 'Fresh remote market';
+    mounted.rerender(view(true));
+    expect(screen.getByText('Cached remote market')).toBeTruthy();
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.getByText(name)).toBeTruthy();
+    expect(catalog.mock.calls.filter(([query]) => !query.counts)).toHaveLength(1);
+    expect(catalog.mock.calls.filter(([query]) => query.counts)).toHaveLength(1);
+  });
+
+  // Unit / Greptile 4583847638: activation can finish the catalog before the
+  // installed snapshot. An unchanged late snapshot must not force a second
+  // round; a changed source still replaces already-read cards immediately.
+  it.each(['unchanged', 'source-changed'] as const)('refreshes a returning market once before a slow snapshot: %s', async outcome => {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(100_000);
+    const normal = invoke.getMockImplementation()!;
+    let holdSnapshot = false;
+    let finish!: (value: unknown) => void;
+    const pending = new Promise(resolve => { finish = resolve; });
+    let name = 'Cached market';
+    const catalog = vi.fn(async (query: { counts?: boolean }) => ({ ...snapshot('computer-a').market,
+      items: [{ pluginId: 'market-one', ghostId: 'market-one', releaseId: 'release-one', name,
+        scope: 'public', publisherKind: 'official', sourceType: 'server', installState: 'not-installed' }],
+      nextCursor: null, counts: query.counts ? { all: 1, public: 1, organization: 0, personal: 0, custom: 0 } : null,
+    }));
+    invoke.mockImplementation(async (device, channel, args) => {
+      const input = args?.[0]?.input;
+      if (input?.read === 'capabilities') return { effects: [], result: { catalogPaging: true } };
+      if (input?.read === 'recommendations') return { effects: [], result: [] };
+      if (input?.read === 'catalog') return { effects: [], result: await catalog(input.query) };
+      if (input?.read === 'installed' && holdSnapshot) return { effects: [], result: await pending };
+      return normal(device, channel, args);
+    });
+    const view = (active: boolean) => <RemotePluginPage device={{ deviceId: 'computer-a', name: 'A' }} online active={active} />;
+    const mounted = render(view(true));
+    await screen.findByText('computer-a');
+    fireEvent.click(screen.getByRole('tab', { name: /^settings.ghosts.page.marketSection/ }));
+    await screen.findByText(name);
+    await waitFor(() => expect(catalog).toHaveBeenCalledTimes(2));
+    mounted.rerender(view(false));
+    catalog.mockClear();
+    clock.mockReturnValue(131_000);
+    vi.useFakeTimers();
+    holdSnapshot = true;
+    name = 'Catalog before snapshot';
+    mounted.rerender(view(true));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.getByText(name)).toBeTruthy();
+    expect(catalog.mock.calls.filter(([query]) => !query.counts)).toHaveLength(1);
+    const next = { ...snapshot('computer-a'), market: { ...snapshot('computer-a').market,
+      customSourceNames: outcome === 'source-changed' ? ['Changed source'] : [] } };
+    if (outcome === 'source-changed') name = 'Catalog after changed source';
+    await act(async () => { finish(next); await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.getByText(name)).toBeTruthy();
+    if (outcome === 'unchanged') {
+      expect(catalog.mock.calls.filter(([query]) => !query.counts)).toHaveLength(1);
+      expect(catalog.mock.calls.filter(([query]) => query.counts)).toHaveLength(1);
+    } else expect(catalog.mock.calls.filter(([query]) => !query.counts).length).toBeGreaterThan(1);
+  });
+
   // Unit, #9487: reconnect previously refreshed the snapshot but retained stale market pages.
   // The same installed set with a changed market release must display the new card.
   it('refreshes cached market cards after reconnect when installed versions are unchanged', async () => {
@@ -218,12 +473,71 @@ describe('selected plugin host', () => {
     const mounted = render(view(true));
     await screen.findByText('computer-a');
     fireEvent.click(screen.getByRole('tab', { name: /^settings.ghosts.page.marketSection/ }));
+    fireEvent.click(screen.getByRole('radio', { name: /settings.ghosts.page.filterAll/ }));
     await screen.findByText('Old market release');
     mounted.rerender(view(false));
     marketName = 'New market release';
     mounted.rerender(view(true));
     await screen.findByText('New market release');
     expect(screen.queryByText('Old market release')).toBeNull();
+  });
+
+  // Unit / Codex C2: while unmounted the page cannot observe Host pushes.
+  // Reconnect tests keep the component mounted and miss a fresh cached remount.
+  // Re-enter within 30 seconds: show the cache during the read, then adopt the
+  // changed installed list, or preserve it with the existing read-failure UI.
+  it.each(['success', 'failure'] as const)('revalidates a warm remote snapshot after remount: %s', async outcome => {
+    vi.spyOn(Date, 'now').mockReturnValue(10_000);
+    const first = render(<RemotePluginPage device={{ deviceId: 'computer-a', name: 'A' }} online />);
+    await screen.findByText('computer-a');
+    first.unmount();
+    const normal = invoke.getMockImplementation()!;
+    let finish!: (value: unknown) => void, fail!: (error: Error) => void;
+    const pending = new Promise((resolve, reject) => { finish = resolve; fail = reject; });
+    invoke.mockImplementation(async (device, channel, args) => args[0]?.actionId === 'management:snapshot'
+      && Object.keys(args[0].input ?? {}).length === 0 ? { effects: [], result: await pending } : normal(device, channel, args));
+    const before = invoke.mock.calls.length;
+    render(<RemotePluginPage device={{ deviceId: 'computer-a', name: 'A' }} online />);
+    expect(screen.getByText('computer-a')).toBeTruthy();
+    await waitFor(() => expect(invoke.mock.calls.slice(before).some(call => call[2]?.[0]?.actionId === 'management:snapshot'
+      && Object.keys(call[2][0].input ?? {}).length === 0)).toBe(true));
+    await act(async () => {
+      if (outcome === 'success') finish(snapshot('Changed while away'));
+      else fail(new Error('Host read failed'));
+    });
+    if (outcome === 'success') {
+      expect(await screen.findByText('Changed while away')).toBeTruthy();
+      expect(screen.queryByText('computer-a')).toBeNull();
+    } else {
+      expect(screen.getByText('computer-a')).toBeTruthy();
+      expect(notices.error).toHaveBeenCalledWith('settings.ghosts.remote.readFailed', expect.objectContaining({ action: expect.any(Object) }));
+    }
+  });
+
+  // Unit / Codex C3 (approved convergence): Settings keeps this page mounted
+  // under a hidden Skills tab. Online/mounted tests missed background focus
+  // reads; initial-hidden and subsequently-hidden paths share the same guard.
+  it.each(['initially-hidden', 'hidden-after-read'] as const)('does not read a hidden remote Host on foreground: %s', async path => {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(10_000);
+    const normal = invoke.getMockImplementation()!;
+    let name = 'Original Host';
+    invoke.mockImplementation(async (device, channel, args) => args[0]?.actionId === 'management:snapshot'
+      && Object.keys(args[0].input ?? {}).length === 0 ? { effects: [], result: snapshot(name) } : normal(device, channel, args));
+    const view = (active: boolean, online = true) => <RemotePluginPage device={{ deviceId: 'computer-a', name: 'A' }} online={online} active={active} />;
+    const mounted = render(view(path === 'hidden-after-read'));
+    if (path === 'hidden-after-read') await screen.findByText(name);
+    mounted.rerender(view(false));
+    const reads = invoke.mock.calls.length;
+    clock.mockReturnValue(41_000);
+    await act(async () => { window.dispatchEvent(new Event('focus')); document.dispatchEvent(new Event('visibilitychange')); });
+    expect(invoke).toHaveBeenCalledTimes(reads);
+    mounted.rerender(view(false, false));
+    mounted.rerender(view(false, true));
+    expect(invoke).toHaveBeenCalledTimes(reads);
+    name = 'Activated Host';
+    mounted.rerender(view(true));
+    expect(await screen.findByText(name)).toBeTruthy();
+    expect(invoke.mock.calls.length).toBeGreaterThan(reads);
   });
 
   it.each(['cancelled', 'changed'] as const)('presents the %s receipt with the existing notice', async outcome => {
@@ -430,6 +744,18 @@ describe('selected plugin host', () => {
     fireEvent.click(screen.getByText('computer-a'));
     await screen.findByTestId('original-settings');
     expect((screen.getByText('Disable') as HTMLButtonElement).disabled).toBe(false);
+  });
+  // A page fixed to a computer it already names (cloud settings) leaves out only the
+  // plain 「正在管理」 notice; what this page alone knows still shows here.
+  it('leaves the plain managing notice to the hosting page and keeps offline', async () => {
+    projects();
+    const device = { deviceId: 'computer-a', name: 'A' };
+    const ui = render(<RemotePluginPage device={device} online hideManagingNotice />);
+    await screen.findByText('computer-a');
+    expect(screen.queryByText('settings.ghosts.remote.managingDescription')).toBeNull();
+    expect(screen.queryByRole('status')).toBeNull();
+    ui.rerender(<RemotePluginPage device={device} online={false} hideManagingNotice />);
+    expect(screen.getByText('settings.ghosts.remote.offlineNotice')).toBeTruthy();
   });
   it('project read failure retains the target with retry and blocks project actions', async () => {
     projects();
@@ -1329,4 +1655,20 @@ describe('remote task interactive-page consent prompt', () => {
     expect(snapshots()).toBe(before + rereads);
   });
 
+});
+
+// Unit / round-5: the remote source control shares the same viewport contract.
+// The old remote setter did not start the new list when its bar was pinned.
+it.each([[120, 50], [-50, 0]])('switches a remote source without forcing an unpinned bar (top=%s)', async (top, expected) => {
+  render(<RemotePluginPage device={{ deviceId: 'computer-a', name: 'A' }} online />);
+  await screen.findByText('computer-a');
+  fireEvent.click(screen.getByRole('tab', { name: /^settings.ghosts.page.marketSection/ }));
+  expect(await screen.findByRole('radio', { name: /settings.ghosts.market.publisherKind.official/, checked: true })).toBeTruthy();
+  const radio = screen.getByRole('radio', { name: /settings.ghosts.market.publisherKind.community/ });
+  const marker = radio.closest('[role="radiogroup"]')!.parentElement!.parentElement!.previousElementSibling!;
+  const root = screen.getByRole('main');
+  vi.spyOn(root, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 800, 800));
+  vi.spyOn(marker, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, top, 800, 0));
+  root.scrollTop = 50; fireEvent.click(radio);
+  expect(root.scrollTop).toBe(expected);
 });

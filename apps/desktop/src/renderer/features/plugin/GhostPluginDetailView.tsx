@@ -1,3 +1,4 @@
+import { parsePluginInstallationSource } from '@cindy/maker-shared/mcp-apps';
 import { getPluginToolUi } from '@cindy/plugin-protocol';
 import { pluginHasToolUi } from '@cindy/plugin-protocol';
 import type { PreparedPluginContribution } from '../../../shared/pluginContributions';
@@ -5,7 +6,6 @@ import { PluginShareButton } from './PluginShareButton';
 import { PluginUiMenu } from '@/cindy-brain/PluginUiContributions';
 import { permissionItemDetail } from '../../../shared/ghostPermissionDetail';
 import { Button } from '@/components/ui/button';
-import { GithubAppCard } from '@/features/cc-agent/GithubAppCard';
 import { GithubAccountCard } from '@/features/cc-agent/GithubAccountCard';
 import { shouldShowOpenPathError } from '../../../shared/openPathResult';
 /**
@@ -37,7 +37,6 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import { PluginUsageCard } from './PluginUsageCard';
 import { PluginReadmeSection, usePluginReadme } from './PluginReadmeSection';
 import { PluginSharedUsage } from './PluginSharedUsage';
 import { PluginPublisherBadge, PluginPublisherDescription } from './PluginPublisherBadge';
@@ -45,9 +44,16 @@ import { pluginPresentationOrigin, type PluginPresentationOrigin } from './lib/p
 import type { PluginMarketItem } from '../../../shared/pluginMarket';
 import { GhostLibrarySection } from './GhostLibrarySection';
 import { GhostHandoffFilesSection } from './GhostHandoffFilesSection';
+import { GhostAccountReuseSection } from './GhostAccountReuseSection';
 import { PluginBackgroundTasksSection } from './PluginBackgroundTasksSection';
 import { PluginControlPointsSection } from './PluginControlPointsSection';
+import { PluginEngineRemoteUseCards, usePluginRemoteUseEngines } from './PluginEngineRemoteUse';
+import { PluginEngineIcon } from '@/components/icons/PluginEngineIcon';
+import { providerShareGate } from '@/features/provider-share/providerShareFormat';
+import { ProviderShareManagePage } from '@/features/provider-share/ProviderShareManagePage';
+import { useRemoteControlEnabled } from '@/hooks/useRemoteControlEnabled';
 import { PluginTaskPrefs } from '@/cindy-brain/PluginTaskPrefs';
+import { PluginFileOpenerSwitch } from './PluginFileOpenerSwitch';
 import { GhostSettingsWebview } from '@/cindy-brain/GhostSettingsWebview';
 import { WINDOW_NO_DRAG_STYLE } from '@/components/layout/windowDrag';
 import {
@@ -64,6 +70,7 @@ import { cn } from '@/lib/utils';
 import {
   declaredGhostControlPoints,
   ghostDeclaresHiddenTasks,
+  ghostInstallApprovalToken,
   ghostToolDeclaresHandoff,
   ghostTrustLabelKey,
   type GhostPermissionItem,
@@ -86,7 +93,9 @@ import { installedGhostStoragePart } from '../../../shared/pluginIdentity';
 import { ghostPluginSummary } from './lib/ghostPluginDetailModel';
 import { ghostPrimaryAction } from './lib/ghostPluginViewModel';
 import { permissionItemIcon } from './lib/permissionItemIcon';
-import { PluginDetailTopBar, usePluginDetailScrolled } from './PluginDetailTopBar';
+import { PluginInstalledDetailFrame } from './PluginDetailTopBar';
+import { PluginInstallRing } from './PluginInstallRing';
+import { usePluginInstallProgress } from './lib/pluginInstallProgress';
 import './plugin-motion.css';
 
 interface GhostPluginDetailViewProps {
@@ -99,11 +108,10 @@ interface GhostPluginDetailViewProps {
   sharePluginId?: string;
   detail: GhostPluginDetail;
   marketItem?: PluginMarketItem | null;
+  installationPending?: boolean;
   panelStatus: string | null;
   enabledOverride?: boolean;
   onBack: () => void;
-  usageOwnerKey?: string;
-  confirmClearUsage?: () => Promise<boolean>;
   publishingSection?: ReactNode;
   onToggle: (enabled: boolean) => void;
   /** 主动作:面板型「使用」/ 指令或 Host 能力型「对话」;纯工具型不渲染主按钮。 */
@@ -159,8 +167,7 @@ export function GhostPluginDetailView({
   onToggle,
   onUse,
   marketItem,
-  usageOwnerKey,
-  confirmClearUsage,
+  installationPending = false,
   mainViewSidebarVisible = true,
   onMainViewSidebarVisibleChange,
   onUpdate,
@@ -179,7 +186,13 @@ export function GhostPluginDetailView({
 }: GhostPluginDetailViewProps) {
   const { t, i18n } = useTranslation();
   const uiLanguage = i18n.resolvedLanguage ?? i18n.language;
-  const { scrolled, onScroll } = usePluginDetailScrolled();
+  // 只有本窗口发起的更新才有进度;远程设备上的插件仍按回执显示。
+  const updateProgress = usePluginInstallProgress(remote ? null : marketItem?.pluginId);
+  const updateFailed = updateProgress?.download.phase === 'failed';
+  const updateLabel =
+    !updateVersion || updateVersion === detail.version
+      ? t('settings.ghosts.market.update')
+      : t('settings.ghosts.market.updateTo', { version: updateVersion });
   const enableSwitchId = useId();
   const publicationBlocked = publishingPreview?.preflight?.actions.canSubmit === false;
   const [githubConnectionVersion, setGithubConnectionVersion] = useState(0);
@@ -197,12 +210,22 @@ export function GhostPluginDetailView({
   const hasGithubConnection =
     !remote && !needsReapproval &&
     ghost?.manifest.network?.secrets?.some(secret => secret.source === 'gh-cli') === true;
+  // 这个插件在本机提供的执行引擎：每个引擎一张「允许被远程调用」的卡片(远程查看别的电脑的插件时不显示，
+  // 开关只能在装着插件的那台电脑上改)。
+  const remoteUseEngines = usePluginRemoteUseEngines(!remote && ghost ? detail.id : null);
+  const remoteControlEnabled = useRemoteControlEnabled();
+  const [shareManageSelection, setShareManageSelection] = useState<{ ghostId: string; engineKey: string } | null>(null);
+  const shareManageEngine = !remote && shareManageSelection?.ghostId === detail.id
+    ? remoteUseEngines.find((engine) => engine.key === shareManageSelection.engineKey && engine.remoteUse?.shareSupported === true) ?? null
+    : null;
   const hasConfiguration =
     hasGithubConnection ||
     Boolean(ghost?.manifest.browserExtension) ||
+    Boolean(ghost?.manifest.fileOpener) ||
     detail.hasMainView ||
     detail.hasSettingsUi ||
-    detail.hasTaskPreferences;
+    detail.hasTaskPreferences ||
+    remoteUseEngines.length > 0;
   const summary = hasGithubConnection
     ? t('ccAgent.gitContext.pr.setup.account.summary')
     : ghostPluginSummary(detail.description, detail.ghostId);
@@ -218,18 +241,33 @@ export function GhostPluginDetailView({
     ghost.approval.state === 'approved' && ghost.namespaceState === 'confirmed' && (ghost.namespace === null || ghost.namespace === 'local') &&
     !ghost.builtin;
 
+  if (shareManageEngine) {
+    return (
+      <main className="app-wallpaper-surface plugin-motion-root h-full min-h-0 w-full overflow-hidden bg-[var(--surface)]">
+        <div className="mx-auto h-full w-full max-w-[824px] px-8 pt-5 max-[760px]:px-6">
+          <ProviderShareManagePage
+            key={`local:${shareManageEngine.providerId}`}
+            providerId={shareManageEngine.providerId}
+            providerName={shareManageEngine.name}
+            providerIcon={<PluginEngineIcon size={18} iconDataUrl={shareManageEngine.iconDataUrl} />}
+            backLabel={detail.name}
+            gate={providerShareGate({
+              remoteControlEnabled,
+              invocationEnabled: shareManageEngine.remoteUse?.enabled === true,
+            })}
+            onBack={() => setShareManageSelection(null)}
+          />
+        </div>
+      </main>
+    );
+  }
+
   return (
-    <main
-      className="app-wallpaper-surface plugin-motion-root h-full min-h-0 w-full overflow-y-auto bg-[var(--surface)] [scrollbar-gutter:stable_both-edges]"
-      onScroll={onScroll}
+    <PluginInstalledDetailFrame
+      label={t('settings.ghosts.detail.backToList')}
+      onBack={onBack}
+      actions={sharePluginId ? <PluginShareButton pluginId={sharePluginId} /> : localShareAvailable && ghost ? <PluginShareButton ghost={ghost} /> : undefined}
     >
-      <PluginDetailTopBar
-        label={t('settings.ghosts.detail.backToList')}
-        onBack={onBack}
-        scrolled={scrolled}
-        actions={sharePluginId ? <PluginShareButton pluginId={sharePluginId} /> : localShareAvailable && ghost ? <PluginShareButton ghost={ghost} /> : undefined}
-      />
-      <article className="plugin-detail-frame mx-auto w-full max-w-[824px] px-8 pb-16 pt-5 max-[760px]:px-6">
         <PluginDetailHeader
           id={detail.id}
           name={detail.name}
@@ -239,6 +277,7 @@ export function GhostPluginDetailView({
           marketItem={marketItem}
           origin={detail.origin}
           publisherKind={detail.publisherKind}
+          installationPending={installationPending}
           installationLabel={detail.installationLabelKey ? t(`settings.ghosts.detail.${detail.installationLabelKey}`, { name: detail.installationNamespace }) : undefined}
           iconDataUrl={detail.iconDataUrl}
           onIconLoadError={onIconLoadError}
@@ -257,30 +296,42 @@ export function GhostPluginDetailView({
                 >
                   {t('settings.ghosts.reapproval.action')}
                 </Button>
-              ) : updateVersion ? (
-                // 更新提级(设计定稿):有新版本时黑色主 CTA 直达市场更新确认流。
-                <Button
-                  variant="cta"
-                  size="lg"
-                  loading={updateBusy}
-                  type="button"
-                  onClick={onUpdate}
-                  disabled={updateBusy}
-                  aria-label={
-                    updateVersion === detail.version
-                      ? t('settings.ghosts.market.update')
-                      : t('settings.ghosts.market.updateTo', { version: updateVersion })
-                  }
-                  aria-busy={updateBusy || undefined}
-                >
-                  <>
-                    <ArrowUp size={14} aria-hidden="true" />
-                    {updateVersion === detail.version
-                      ? t('settings.ghosts.market.update')
-                      : t('settings.ghosts.market.updateTo', { version: updateVersion })}
-                  </>
-                </Button>
-              ) : null}
+              ) : (
+                <>
+                  {/* 更新进行中:圆环原位替换更新按钮;失败时圆环停在原处,按钮回来供重试。 */}
+                  {updateProgress && (!updateFailed || updateVersion) ? (
+                    <PluginInstallRing
+                      label={updateLabel}
+                      progress={updateProgress}
+                      size={24}
+                      explainRetry
+                      className="max-w-[260px] px-1 text-13 font-medium"
+                    />
+                  ) : null}
+                  {updateVersion && (!updateProgress || updateFailed) ? (
+                    // 更新提级(设计定稿):有新版本时黑色主 CTA 直达市场更新确认流。
+                    <Button
+                      variant="cta"
+                      size="lg"
+                      loading={updateBusy}
+                      type="button"
+                      onClick={onUpdate}
+                      disabled={updateBusy}
+                      aria-label={updateLabel}
+                      aria-busy={updateBusy || undefined}
+                    >
+                      {updateFailed ? (
+                        t('commonUi.retry')
+                      ) : (
+                        <>
+                          <ArrowUp size={14} aria-hidden="true" />
+                          {updateLabel}
+                        </>
+                      )}
+                    </Button>
+                  ) : null}
+                </>
+              )}
               {!remote && primaryAction !== 'manage' ? (
                 <Button
                   variant={updateVersion ? 'secondary' : 'cta'}
@@ -411,14 +462,6 @@ export function GhostPluginDetailView({
           ) : null}
         </PluginDetailHeader>
 
-        {ghost && !remote ? (
-          <PluginUsageCard
-            key={`${usageOwnerKey ?? 'local'}:${detail.id}`}
-            ghostId={detail.id}
-            confirmClear={confirmClearUsage}
-          />
-        ) : null}
-
         <PluginReadmeSection readme={readme} />
 
         {remote ? remoteConfiguration : hasConfiguration ? (
@@ -487,6 +530,14 @@ export function GhostPluginDetailView({
                   />
                 </div>
               ) : null}
+              {ghost?.manifest.fileOpener ? (
+                <PluginFileOpenerSwitch
+                  ghostId={detail.id}
+                  name={detail.name}
+                  extensions={ghost.manifest.fileOpener.extensions}
+                  surfaceClassName={DETAIL_SURFACE_CLASS}
+                />
+              ) : null}
               {detail.hasSettingsUi ? (
                 ghost ? (
                   <>
@@ -495,10 +546,11 @@ export function GhostPluginDetailView({
                       reloadKey={githubConnectionVersion}
                       account={
                         hasGithubConnection ? (
-                          <div>
-                            <GithubAccountCard onConnected={() => setGithubConnectionVersion((version) => version + 1)} />
-                            {ghost.manifest.id === 'cindy-github' && ghost.namespace === null && <GithubAppCard />}
-                          </div>
+                          <GithubAccountCard
+                            pluginSettings
+                            includeEvents={ghost.manifest.id === 'cindy-github' && ghost.namespace === null}
+                            onConnected={() => setGithubConnectionVersion((version) => version + 1)}
+                          />
                         ) : undefined
                       }
                       ghost={ghost}
@@ -529,6 +581,11 @@ export function GhostPluginDetailView({
                   </div>
                 )
               ) : null}
+              <PluginEngineRemoteUseCards
+                engines={remoteUseEngines}
+                onManageShare={(engine) => setShareManageSelection({ ghostId: detail.id, engineKey: engine.key })}
+                surfaceClassName={DETAIL_SURFACE_CLASS}
+              />
               {ghost?.manifest.routineEvents ? (
                 <p className="text-13 text-[var(--text-secondary)]">
                   {t('routines.pluginCapability')}
@@ -617,6 +674,7 @@ export function GhostPluginDetailView({
           </Button>
         ) : null}
 
+        {!remote ? <GhostAccountReuseSection key={`${detail.id}:${ghostInstallApprovalToken(ghost?.approval)}`} ghostId={detail.id} enabled={enabled} declared={ghost?.manifest.network?.secrets?.some(secret => !secret.source || secret.source === 'user' || secret.source === 'oauth') === true} /> : null}
         {!remote ? <GhostLibrarySection ghostId={detail.id} enabled={ghost?.manifest.library === true} /> : null}
         {!remote ? (
           <GhostHandoffFilesSection
@@ -628,8 +686,7 @@ export function GhostPluginDetailView({
         {publishingSection}
 
         <DetailsSection detail={remote ? { ...detail, installDir: null } : detail} panelStatus={panelStatus} />
-      </article>
-    </main>
+    </PluginInstalledDetailFrame>
   );
 }
 
@@ -657,6 +714,7 @@ export function PluginDetailHeader({
   origin,
   publisherKind,
   installationLabel,
+  installationPending = false,
   iconDataUrl,
   actions,
   children,
@@ -671,6 +729,7 @@ export function PluginDetailHeader({
   origin?: PluginPresentationOrigin;
   publisherKind?: PluginMarketItem['publisherKind'];
   installationLabel?: string;
+  installationPending?: boolean;
   iconDataUrl?: string;
   actions?: ReactNode;
   children?: ReactNode;
@@ -741,7 +800,7 @@ export function PluginDetailHeader({
             <PluginPublisherBadge origin={source} kind={kind} />
           </div>
           <GhostPluginMetadata author={visibleAuthor} version={version} marketItem={marketItem} />
-          {installationLabel ? <p className="mt-1 break-words text-12 text-[var(--text-tertiary)]">{installationLabel}</p> : null}
+          {installationLabel || installationPending ? <p aria-hidden={!installationLabel || undefined} className="mt-1 break-words text-12 text-[var(--text-tertiary)]">{installationLabel || '\u00a0'}</p> : null}
         </div>
 
         {actions}
@@ -846,6 +905,7 @@ function SectionTextAction({
       type="button"
       aria-expanded={expanded}
       onClick={onClick}
+      // 无框文字按钮：圆角只塑形键盘焦点环（DESIGN.md §5 登记）
       className="shrink-0 rounded-md px-1 py-0.5 text-13 text-[var(--text-secondary)] transition-colors duration-150 hover:text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
     >
       {children}
@@ -916,7 +976,7 @@ export function ToolDescriptionChip({ tool }: { tool: Pick<GhostToolDecl, 'name'
         sideOffset={8}
         className={cn(
           DETAIL_SURFACE_CLASS,
-          'z-[10000] w-[320px] rounded-xl p-4 text-[var(--text-primary)] shadow-[shadow:var(--shadow-menu)] data-[state=open]:animate-none data-[state=closed]:animate-none',
+          'w-[320px] rounded-xl p-4 text-[var(--text-primary)] shadow-[shadow:var(--shadow-menu)] data-[state=open]:animate-none data-[state=closed]:animate-none',
         )}
       >
         <p className="text-13 leading-5 text-[var(--text-secondary)]">
@@ -1061,8 +1121,6 @@ export function DetailsSection({
   );
   // 用户拖过 / 弹过 / 已套过默认边:给「恢复默认位置」。
   const canResetPlacement = hasPluginPlacementMemory(detail.id);
-  const placementActionClass =
-    'shrink-0 rounded-md px-2 py-1 text-12 text-[var(--text-secondary)] transition-colors hover:bg-[var(--surface-hover-soft)] hover:text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]';
   const facts: Array<{
     key: string;
     label: string;
@@ -1086,8 +1144,13 @@ export function DetailsSection({
         ]
       : []),
     {
+      key: 'source',
+      label: t('mcpApps.sourceLabel'),
+      value: t(`mcpApps.source.${parsePluginInstallationSource(detail.installationSource).kind}`, { namespace: detail.installationSource?.namespace }),
+    },
+    {
       key: 'trust',
-      label: t('settings.ghosts.detail.infoTrust'),
+      label: t('mcpApps.signatureLabel'),
       value: t(`settings.ghosts.trust.${trustLabelKey}`, {
         publisher: detail.trust.publisherName ?? t('settings.ghosts.trust.unknownPublisher'),
       }),
@@ -1124,26 +1187,30 @@ export function DetailsSection({
             action: (
               <span className="flex shrink-0 items-center gap-1">
                 {detail.enabled && !inSidebar && (
-                  <button
-                    type="button"
+                  <Button
+                    variant="secondary"
+                    tone="quiet"
+                    size="xs"
+                    compact
                     onClick={() => {
                       if (installedGhost) void openPluginInSidebar(installedGhost, 'panel');
                     }}
-                    className={placementActionClass}
                   >
                     {t('settings.ghosts.detail.openInSidebar')}
-                  </button>
+                  </Button>
                 )}
                 {canResetPlacement && (
-                  <button
-                    type="button"
+                  <Button
+                    variant="secondary"
+                    tone="quiet"
+                    size="xs"
+                    compact
                     onClick={() => {
                       if (installedGhost) void resetPluginPlacementAndReturn(installedGhost);
                     }}
-                    className={placementActionClass}
                   >
                     {t('settings.ghosts.detail.resetPlacement')}
-                  </button>
+                  </Button>
                 )}
               </span>
             ),
@@ -1169,7 +1236,7 @@ export function DetailsSection({
                   }}
                   title={t('settings.ghosts.detail.copyLocation')}
                   aria-label={t('settings.ghosts.detail.copyLocation')}
-                  className="grid size-7 shrink-0 place-items-center rounded-md text-[var(--text-tertiary)] transition-colors hover:bg-[var(--surface-hover-soft)] hover:text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
+                  className="grid size-7 shrink-0 place-items-center rounded-lg text-[var(--text-tertiary)] transition-colors hover:bg-[var(--surface-hover-soft)] hover:text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
                 >
                   <Copy size={14} aria-hidden="true" />
                 </button>
@@ -1188,7 +1255,7 @@ export function DetailsSection({
                   }}
                   title={t('settings.ghosts.detail.openLocation')}
                   aria-label={t('settings.ghosts.detail.openLocation')}
-                  className="grid size-7 shrink-0 place-items-center rounded-md text-[var(--text-tertiary)] transition-colors hover:bg-[var(--surface-hover-soft)] hover:text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
+                  className="grid size-7 shrink-0 place-items-center rounded-lg text-[var(--text-tertiary)] transition-colors hover:bg-[var(--surface-hover-soft)] hover:text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
                 >
                   <FolderOpen size={14} aria-hidden="true" />
                 </button>
@@ -1314,12 +1381,12 @@ function DialogFrame({ children }: { children: ReactNode }) {
   return (
     <Dialog.Portal>
       <Dialog.Overlay
-        className="modal-scrim fixed inset-0 z-[10000]"
+        className="modal-scrim fixed inset-0 z-modal"
         style={WINDOW_NO_DRAG_STYLE}
       />
       <Dialog.Content
         onPointerDownOutside={(event) => event.preventDefault()}
-        className="modal-panel fixed left-1/2 top-1/2 z-[10000] flex max-h-[70vh] w-[calc(100vw-48px)] max-w-[560px] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden text-[var(--text-primary)] focus:outline-none"
+        className="modal-panel fixed left-1/2 top-1/2 z-modal flex max-h-[70vh] w-[calc(100vw-48px)] max-w-[560px] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden text-[var(--text-primary)] focus:outline-none"
         style={WINDOW_NO_DRAG_STYLE}
       >
         {children}
