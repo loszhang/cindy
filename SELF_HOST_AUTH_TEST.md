@@ -266,4 +266,18 @@ auth 服务的 stdout 依次出现：
 
 > Windows 上 `pnpm.cmd dco:install-hook --check` 可能提示 hook “NOT executable”——因为 `core.fileMode=false` 时 Node 按 Unix 执行位判断会误报；hook 实际会被 Git 执行。用一次空的测试提交（`git commit --allow-empty -m "test dco hook"`）看 message 里有没有 `Signed-off-by` 即可确认。
 
-> 分支历史曾为修复 DCO 做过一次 `--signoff` rebase 并 force push。新机器请先 `git fetch` 后以远端 `origin/feat/self-hosted-auth` 为准，不要基于旧提交继续开发。
+### 已经 clone 过的测试机如何继续
+
+分支历史曾为修复 DCO 做过一次 `--signoff` rebase 并 force push。**不需要重新 clone**，但旧 clone 已与远端分叉，按情况处理：
+
+| 本地状态 | 操作 |
+|---|---|
+| 不改代码、没有本地提交 | `git fetch origin` 后 `git reset --hard origin/feat/self-hosted-auth` |
+| 有本地提交或未提交改动 | 先 `git stash push -u` 和 `git branch my-local-work` 保存，再 fetch + reset；之后 `git stash pop`，本地提交用 `git cherry-pick <sha>` 逐个接回 |
+| 不再与远端同步 | 可以原样继续测试（rebase 只改哈希，文件内容一致），但不要从这个旧状态 `push` |
+
+注意：
+
+- `reset --hard` 只影响 Git 跟踪的文件；被 gitignore 的 `config/endpoint.dev.json`、`node_modules` 和仓库外的 `cindy-auth/` 不会被动到，不必重新配置或安装依赖。
+- **不要用 `git pull`**：旧历史与重写后的历史分叉，`pull` 会生成把两者合并的 merge commit。
+- 对齐后若这台机器还没装过 DCO hook，按上面的 `pnpm.cmd dco:install-hook` 装一次。
