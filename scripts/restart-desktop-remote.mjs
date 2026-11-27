@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -361,6 +361,120 @@ export function clearDesktopDevCaches(root = rootDir, { logger = console } = {})
   } else {
     logger.log('==> Desktop dev cache already clean.');
   }
+  return removed;
+}
+
+const desktopCacheFingerprintRelativePath = path.join('node_modules', '.cache', 'cindy-desktop-vite-cache.json');
+
+/**
+ * 会让 Desktop Vite 预打包 / 构建产物过期的输入文件。
+ * workspace package.json 包含 exports 映射，包入口 barrel 覆盖「只改 index.ts 新增 re-export」的情况。
+ */
+export function desktopViteCacheInputFiles(root = rootDir) {
+  const files = new Set();
+  const add = (relativePath) => {
+    const absolute = path.resolve(root, relativePath);
+    try {
+      if (fs.statSync(absolute).isFile()) {
+        files.add(path.relative(root, absolute).split(path.sep).join('/'));
+      }
+    } catch {
+      // 缺失文件不参与指纹；之后新增文件会改变汇总结果并触发清理。
+    }
+  };
+
+  add('pnpm-lock.yaml');
+  add('pnpm-workspace.yaml');
+  add('package.json');
+
+  for (const workspaceRoot of ['apps', 'packages']) {
+    let names = [];
+    try {
+      names = fs.readdirSync(path.join(root, workspaceRoot));
+    } catch {}
+    for (const name of names) {
+      const pkgRelative = path.join(workspaceRoot, name, 'package.json');
+      add(pkgRelative);
+
+      let pkg = null;
+      try {
+        pkg = JSON.parse(fs.readFileSync(path.resolve(root, pkgRelative), 'utf8'));
+      } catch {}
+      if (!pkg) continue;
+
+      const candidates = [pkg.main, pkg.module, pkg.types, pkg.source];
+      const rootExport = pkg.exports && typeof pkg.exports === 'object' ? pkg.exports['.'] : pkg.exports;
+      if (typeof rootExport === 'string') candidates.push(rootExport);
+      else if (rootExport && typeof rootExport === 'object') {
+        for (const value of Object.values(rootExport)) {
+          if (typeof value === 'string') candidates.push(value);
+          else if (value && typeof value === 'object') {
+            for (const nested of Object.values(value)) if (typeof nested === 'string') candidates.push(nested);
+          }
+        }
+      }
+      for (const candidate of candidates) {
+        if (typeof candidate === 'string' && candidate.startsWith('.')) {
+          add(path.join(workspaceRoot, name, candidate));
+        }
+      }
+    }
+  }
+
+  let patches = [];
+  try {
+    patches = fs.readdirSync(path.join(root, 'dependency-patches'));
+  } catch {}
+  for (const name of patches) {
+    if (name.endsWith('.patch')) add(path.join('dependency-patches', name));
+  }
+
+  return [...files].sort();
+}
+
+export function desktopViteCacheFingerprint(root = rootDir) {
+  const hash = createHash('sha256');
+  for (const relativePath of desktopViteCacheInputFiles(root)) {
+    hash.update(relativePath).update('\0')
+      .update(fs.readFileSync(path.join(root, relativePath))).update('\0');
+  }
+  return hash.digest('hex');
+}
+
+function desktopCacheFingerprintPath(root) {
+  return path.join(root, desktopCacheFingerprintRelativePath);
+}
+
+function readDesktopCacheFingerprint(root) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(desktopCacheFingerprintPath(root), 'utf8'));
+    return parsed && parsed.version === 1 && typeof parsed.fingerprint === 'string'
+      ? parsed.fingerprint
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeDesktopCacheFingerprint(root, fingerprint) {
+  const target = desktopCacheFingerprintPath(root);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, `${JSON.stringify({ version: 1, fingerprint })}\n`);
+}
+
+/**
+ * 仅在依赖 / 内部包导出面等输入变化时清理 Desktop Vite 缓存；否则复用，
+ * 避免每次重启都做几分钟的冷编译。
+ */
+export function syncDesktopDevCaches(root = rootDir, { logger = console } = {}) {
+  const fingerprint = desktopViteCacheFingerprint(root);
+  const hasCaches = desktopDevCacheDirs(root).some((dir) => fs.existsSync(dir));
+  if (hasCaches && readDesktopCacheFingerprint(root) === fingerprint) {
+    logger.log('==> Desktop dev cache reused (dependency inputs unchanged).');
+    return [];
+  }
+  const removed = clearDesktopDevCaches(root, { logger });
+  writeDesktopCacheFingerprint(root, fingerprint);
   return removed;
 }
 
@@ -1361,7 +1475,10 @@ export function resolveDesktopLaunchPolicy(argv, {
   // The unattended shared launcher can have a tty on stdin that is already at EOF.
   // Give the long-lived Forge process its own Terminal instead of that descriptor.
   const needsOwnTerminal = supervised && argv.includes('--shared') && env.CINDY_PERSONAL_FIXED_APP && !stdoutIsTTY;
-  return { reuseTerminal: reuseRequested && !needsOwnTerminal, coldBuildTimeoutMs: supervised ? 600_000 : null };
+  // Every non-preserve launch clears the Vite caches (see clearDesktopDevCaches), so a
+  // restart is always a cold build. Budget that phase separately and keep the 180s
+  // startupReadyTimeoutMs for window/auth/database after `window-ready`.
+  return { reuseTerminal: reuseRequested && !needsOwnTerminal, coldBuildTimeoutMs: 600_000 };
 }
 
 export async function waitForDesktopStartup(statusPath, timeoutMs = startupReadyTimeoutMs, {
@@ -1831,7 +1948,7 @@ async function main() {
   if (process.env.CINDY_PERSONAL_ASSET_DIGEST && process.env.CINDY_PERSONAL_MONITOR_DIR && process.env.CINDY_PERSONAL_GENERATION) {
     const { verifyInterface } = await import('./personal-build/interface-assets.mjs');
     verifyInterface(rootDir, process.env.CINDY_PERSONAL_ASSET_DIGEST);
-  } else if (!preserveRunning) clearDesktopDevCaches(rootDir);
+  } else if (!preserveRunning) syncDesktopDevCaches(rootDir);
 
   let startupStatusPath = null;
   if (waitReady) {

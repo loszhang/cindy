@@ -10,6 +10,7 @@ import {
 	applyDesktopStartupConfigForPhase,
 	clearInheritedIsolatedAuthAuthorization,
 	clearDesktopDevCaches,
+	syncDesktopDevCaches,
 	commandUsesUserDataDir,
 	createIsolatedAuthLaunchProof,
 	defaultIsolatedUserDataDir,
@@ -247,6 +248,76 @@ test("desktop restart clears only desktop Vite dev caches", () => {
 		assert.match(logs.join("\n"), /Cleared desktop dev cache/);
 	} finally {
 		fs.rmSync(repo, { recursive: true, force: true });
+	}
+});
+
+function createDesktopCacheSyncFixture() {
+	const repo = fs.mkdtempSync(path.join(os.tmpdir(), "cindy-dev-cache-sync-"));
+	const recreateCaches = () => {
+		for (const dir of desktopDevCacheDirs(repo)) {
+			fs.mkdirSync(dir, { recursive: true });
+			fs.writeFileSync(path.join(dir, "marker"), "cached\n");
+		}
+	};
+	recreateCaches();
+	fs.writeFileSync(path.join(repo, "pnpm-lock.yaml"), "lock: 1\n");
+	fs.writeFileSync(path.join(repo, "package.json"), "{}\n");
+	const pkgDir = path.join(repo, "packages", "internal");
+	fs.mkdirSync(path.join(pkgDir, "src"), { recursive: true });
+	fs.writeFileSync(path.join(pkgDir, "package.json"), JSON.stringify({
+		name: "@fixture/internal",
+		main: "./src/index.ts",
+		exports: { ".": "./src/index.ts" },
+	}));
+	fs.writeFileSync(path.join(pkgDir, "src", "index.ts"), "export const a = 1;\n");
+	return { repo, recreateCaches };
+}
+
+test("desktop restart reuses Vite caches when dependency inputs are unchanged", () => {
+	const { repo, recreateCaches } = createDesktopCacheSyncFixture();
+	try {
+		const logs = [];
+		const logger = { log: (message) => logs.push(message) };
+		assert.equal(syncDesktopDevCaches(repo, { logger }).length, 2);
+		assert.match(logs.join("\n"), /Cleared desktop dev cache/);
+
+		recreateCaches();
+		logs.length = 0;
+		assert.deepEqual(syncDesktopDevCaches(repo, { logger }), []);
+		assert.match(logs.join("\n"), /Desktop dev cache reused/);
+		for (const dir of desktopDevCacheDirs(repo)) {
+			assert.equal(fs.existsSync(path.join(dir, "marker")), true);
+		}
+	} finally {
+		fs.rmSync(repo, { recursive: true, force: true });
+	}
+});
+
+test("desktop restart clears Vite caches when lockfile or export surface changes", () => {
+	const cases = [
+		["lockfile", (repo) => fs.writeFileSync(path.join(repo, "pnpm-lock.yaml"), "lock: 2\n")],
+		["package exports", (repo) => {
+			const file = path.join(repo, "packages", "internal", "package.json");
+			const pkg = JSON.parse(fs.readFileSync(file, "utf8"));
+			pkg.exports["./new-export"] = "./src/newExport.ts";
+			fs.writeFileSync(file, JSON.stringify(pkg));
+		}],
+		["entry barrel", (repo) => {
+			const file = path.join(repo, "packages", "internal", "src", "index.ts");
+			fs.writeFileSync(file, `${fs.readFileSync(file, "utf8")}export const b = 2;\n`);
+		}],
+	];
+	for (const [label, change] of cases) {
+		const { repo, recreateCaches } = createDesktopCacheSyncFixture();
+		try {
+			syncDesktopDevCaches(repo, { logger: { log: () => {} } });
+			recreateCaches();
+			change(repo);
+			const removed = syncDesktopDevCaches(repo, { logger: { log: () => {} } });
+			assert.equal(removed.length, 2, `${label} should invalidate the caches`);
+		} finally {
+			fs.rmSync(repo, { recursive: true, force: true });
+		}
 	}
 });
 
@@ -979,10 +1050,11 @@ test('only a supervised fixed app with redirected output gives Forge a separate 
 	const resolve = (args, env, stdoutIsTTY = false) =>
 		resolveDesktopLaunchPolicy(args, { env, platform: 'darwin', stdoutIsTTY });
 	assert.equal(resolve(sharedArgs, supervisedEnv, true).reuseTerminal, true);
-	assert.deepEqual(resolve(sharedArgs, {}), { reuseTerminal: true, coldBuildTimeoutMs: null });
+	// Every restart clears the Vite caches, so the cold-build budget is universal.
+	assert.deepEqual(resolve(sharedArgs, {}), { reuseTerminal: true, coldBuildTimeoutMs: 600_000 });
 	assert.deepEqual(resolve(['--isolated=smoke', '--mock', '--reuse-terminal'], supervisedEnv),
 		{ reuseTerminal: true, coldBuildTimeoutMs: 600_000 });
-	assert.deepEqual(resolve(['--shared'], supervisedEnv), { reuseTerminal: false, coldBuildTimeoutMs: null });
+	assert.deepEqual(resolve(['--shared'], supervisedEnv), { reuseTerminal: false, coldBuildTimeoutMs: 600_000 });
 });
 
 test('cold start waits for Forge, then bounds auth/database from the first window', async t => {
