@@ -19,9 +19,14 @@
 
 | 依赖 | 要求 | 检查 |
 |---|---|---|
-| Node.js | 22.x（仓库 `engines.node >= 22.13`） | `node -v` |
+| Node.js | **≥ 22.19.0**（推荐按 `.nvmrc` 用 22.22.3） | `node -v` |
 | pnpm | **11.28.9**（`packageManager` 指定，`engineStrict` 会拦旧版） | `corepack prepare pnpm@11.28.9 --activate` 然后 `corepack pnpm -v` |
 | Git LFS | 必需（仓库有 LFS 资源） | `git lfs version` |
+
+> **Node 不能只满足根 `package.json` 的 `engines.node >= 22.13`。**
+> 依赖 `@earendil-works/pi-ai@0.85.1` 要求 `node >= 22.19.0`，用 22.13–22.18 会在
+> `pnpm install --frozen-lockfile` 阶段直接报 `ERR_PNPM_UNSUPPORTED_ENGINE`。
+> 本仓 `.nvmrc` 固定为 22.22.3，优先按它准备。
 
 Windows 上 PowerShell 的执行策略会拦 corepack 生成的 `pnpm.ps1`，**统一用 `pnpm.cmd` 调用**即可绕过：
 
@@ -197,9 +202,36 @@ auth 服务的 stdout 依次出现：
 |---|---|---|
 | `无法加载文件 ...pnpm.ps1，未对文件…进行数字签名` | PowerShell 执行策略 | 用 `pnpm.cmd`；或 `Set-ExecutionPolicy -Scope Process Bypass` |
 | `This project is configured to use 11.28.9 of pnpm. Your current pnpm is vX` | 用了系统里的旧 pnpm | `corepack prepare pnpm@11.28.9 --activate`，并确保 PATH 上 corepack 的 shim 优先 |
+| `corepack prepare` 报 `Cannot find matching keyid` | Node 自带 corepack 版本太旧，不认识 pnpm 11.28.9 的签名密钥 | 在该 Node 安装目录下用 `npm install -g pnpm@11.28.9` 装好后直接调 `pnpm.cmd` |
+| `ERR_PNPM_UNSUPPORTED_ENGINE`（如 `@earendil-works/pi-ai` 要求 `>=22.19.0`） | Node 低于依赖要求（22.13–22.18 会中招） | 升级到 22.19+，推荐 `.nvmrc` 的 22.22.3 |
 | `客户端端点清单字段 cdnBaseUrl 必须是无凭据 HTTPS URL` | 复制了 `.example` 的 `http://` | 改成 `https://` |
 | `客户端端点清单不是合法 JSON` | 文件带 UTF-8 BOM | 用 Node 重写，别用 `Set-Content -Encoding UTF8` |
 | `FATAL ERROR: Reached heap limit` | 构建期堆不足 | `NODE_OPTIONS=--max-old-space-size=16384` |
 | Electron 启动后立刻退出、连 userData 都不建 | 本机已有原版 Cindy 在跑（单实例锁），或隔离未生效 | 完全退出原版 Cindy；或加 `--isolated=dev` 参数 |
 | 登录页报 `REGION_MISMATCH` | `providers.region` 与构建区域不一致 | 统一 `--region dev/cn` + `AUTH_REGION=cn`，或都用 `global` |
 | 登录报 `AUTH_SERVICE_UNAVAILABLE` | auth 服务没起 / 端口不对 | `curl.exe http://127.0.0.1:3344/healthz` 应返回 `{"ok":true,...}` |
+| 启动器报 `STARTUP_TIMEOUT`，但应用随后能起来 | 首次冷构建超过 180 秒 readiness 上限（非真实失败） | 冷构建阶段已放宽到 600 秒；看到该 verdict 时先看 Electron 是否仍在编译，不要直接判失败 |
+| 窗口出现后空白好几分钟 | 重启清 Vite 缓存导致 renderer 重新预打包，`index.html` 无静态占位 | 已改为按依赖/导出面指纹判断：输入不变则复用缓存；只有改导出面才重新冷编译 |
+
+---
+
+## 八、本机实测记录（2026-11-27）
+
+按本文在 Windows 上完整走通一次，供复现时对照：
+
+| 步骤 | 结果 |
+|---|---|
+| 依赖安装 | Node 22.22.x + pnpm 11.28.9，`pnpm install --frozen-lockfile` 成功；agent 二进制 best-effort 下载完成 |
+| auth 服务 | `AUTH_REGION=cn` + `AUTH_FIXED_CODE=123456`，`/healthz` 返回 `{"ok":true,"region":"cn"}` |
+| dev 客户端 | `pnpm restart:desktop:remote --region=dev --isolated=dev`（首次冷构建较慢） |
+| 登录 | 服务端 stdout 依次出现 `[code]` / `[login]`，`data.json` 出现该用户，客户端进入主界面 |
+| 重启保持登录 | 冷启动后未回登录页；refresh token 哈希发生变化（旧 token 被轮换），证明走了 `/api/auth/refresh` |
+| 缓存复用 | 第二次重启打印 `Desktop dev cache reused (dependency inputs unchanged)`，无需重新预打包 |
+
+过程中遇到并修复的问题：
+
+1. **Node 版本写低了**：只写 22.x，但依赖 `@earendil-works/pi-ai` 要求 `>=22.19.0` → 已修正环境要求表与常见问题。
+2. **启动器误报 `STARTUP_TIMEOUT`**：冷构建被算进 180 秒 readiness 上限 → 改为两段式，冷构建/首个窗口 600 秒，`window-ready` 后 180 秒。
+3. **窗口空白数分钟**：每次重启清 Vite 缓存，renderer 重新预打包 → 改为按 lockfile / workspace / patch / 内部包导出面指纹判断，输入不变则复用缓存。
+
+> 打包版只能验证“能启动、能开窗”：它只接受 https 端点，本机 http auth 无法在打包版登录；登录链路仍需在 dev 模式验证。
