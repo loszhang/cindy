@@ -235,3 +235,35 @@ auth 服务的 stdout 依次出现：
 3. **窗口空白数分钟**：每次重启清 Vite 缓存，renderer 重新预打包 → 改为按 lockfile / workspace / patch / 内部包导出面指纹判断，输入不变则复用缓存。
 
 > 打包版只能验证“能启动、能开窗”：它只接受 https 端点，本机 http auth 无法在打包版登录；登录链路仍需在 dev 模式验证。
+
+---
+
+## 九、换机器 / 新 clone 的注意事项
+
+下面这些配置都是**按机器/按 clone** 的，不会随 Git 带过去，新测试机必须逐项准备：
+
+| 项目 | 说明 |
+|---|---|
+| Node | ≥ 22.19.0，推荐 `.nvmrc` 的 22.22.3；低于此值 `pnpm install` 报 `ERR_PNPM_UNSUPPORTED_ENGINE` |
+| pnpm | 11.28.9；若 `corepack prepare` 报 `Cannot find matching keyid`，在该 Node 目录下 `npm install -g pnpm@11.28.9` 后直接用 `pnpm.cmd` |
+| PowerShell | 执行策略会拦 `pnpm.ps1`，统一用 `pnpm.cmd` |
+| `config/endpoint.dev.json` | 被 `.gitignore` 忽略，需按 §5.1 自行创建；不要直接复制 `.example`（`cdnBaseUrl` 是 http） |
+| `cindy-auth/` | 服务端不在本仓，需单独带到测试机；`data.json` 含 refresh token，不要提交进仓库 |
+| `apps/desktop/.env` | 由启动器按 `--region=dev` 生成，不用手工维护 |
+
+**提交代码前的 DCO 要求**（只要在新机器上 commit 就必须做）：
+
+1. 每个 commit 都要带与 author/committer 一致的 `Signed-off-by`。最稳妥是始终用 `git commit -s`。
+2. 在每个新 clone 上运行一次：
+
+   ```powershell
+   pnpm.cmd dco:install-hook
+   ```
+
+   hook 装在 `.git/hooks/`，**不会随仓库同步**，每台机器、每个 worktree 都要单独装。装完即使忘记 `-s`，hook 也会自动补签。
+
+3. 提交前自查：`pnpm.cmd check:dco`。它通过才算 branch 上的提交都合规。
+
+> Windows 上 `pnpm.cmd dco:install-hook --check` 可能提示 hook “NOT executable”——因为 `core.fileMode=false` 时 Node 按 Unix 执行位判断会误报；hook 实际会被 Git 执行。用一次空的测试提交（`git commit --allow-empty -m "test dco hook"`）看 message 里有没有 `Signed-off-by` 即可确认。
+
+> 分支历史曾为修复 DCO 做过一次 `--signoff` rebase 并 force push。新机器请先 `git fetch` 后以远端 `origin/feat/self-hosted-auth` 为准，不要基于旧提交继续开发。
